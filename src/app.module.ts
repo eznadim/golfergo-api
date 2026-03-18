@@ -6,6 +6,7 @@ import { VisitorsModule } from './visitors/visitors.module';
 import { AuthModule } from './auth/auth.module';
 import { SupabaseModule } from './supabase/supabase.module';
 import { HelloModule } from './hello/hello.module';
+import { BookingModule } from './booking/booking.module';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { HelloModule } from './hello/hello.module';
     AuthModule,
     VisitorsModule,
     HelloModule,
+    BookingModule,
   ],
   controllers: [AppController],
   providers: [AppService],
