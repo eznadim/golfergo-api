@@ -253,10 +253,10 @@ export class BookingService {
     bookingDate,
   }: {
     golfClubSlug: string;
-    bookingDate: string;
+    bookingDate?: string;
   }) {
     const clubContext = await this.getClubContextBySlug(golfClubSlug);
-    const teeSlots = await this.getTeeSlotsForDate(clubContext, bookingDate);
+    const teeSlots = await this.getTeeSlots(clubContext, bookingDate);
 
     const slots = await Promise.all(
       teeSlots.map(async (slot) => {
@@ -300,7 +300,7 @@ export class BookingService {
         slug: clubContext.organization.slug,
         name: clubContext.facility.facility_name || clubContext.organization.name,
       },
-      bookingDate,
+      bookingDate: bookingDate ?? null,
       slots: slots.filter((item): item is NonNullable<typeof item> => item !== null),
     };
   }
@@ -798,20 +798,29 @@ export class BookingService {
     return (result.data ?? []) as ResourceInstanceRow[];
   }
 
-  private async getTeeSlotsForDate(clubContext: ClubContext, bookingDate: string) {
+  private async getTeeSlots(clubContext: ClubContext, bookingDate?: string) {
     const teeInstanceIds = [...clubContext.teeInstancesById.keys()];
     if (teeInstanceIds.length === 0) {
       return [];
     }
 
-    const { dayStartIso, dayEndIso } = this.getDayRange(bookingDate);
-    const result = await this.supabase.client
+    const rangeStartIso = bookingDate
+      ? this.getDayRange(bookingDate).dayStartIso
+      : this.getTodayRange().dayStartIso;
+    const rangeEndIso = bookingDate ? this.getDayRange(bookingDate).dayEndIso : undefined;
+
+    let query = this.supabase.client
       .from('resource_slot')
       .select('slot_id, resource_instance_id, start_at, end_at, base_price')
       .in('resource_instance_id', teeInstanceIds)
-      .gte('start_at', dayStartIso)
-      .lt('start_at', dayEndIso)
+      .gte('start_at', rangeStartIso)
       .order('start_at', { ascending: true });
+
+    if (rangeEndIso) {
+      query = query.lt('start_at', rangeEndIso);
+    }
+
+    const result = await query;
 
     if (result.error) {
       this.throwSupabaseError(result.error.message);
@@ -819,8 +828,8 @@ export class BookingService {
 
     const overrides = await this.getAvailabilityOverrides(
       clubContext.facility.facility_id,
-      dayStartIso,
-      dayEndIso,
+      rangeStartIso,
+      rangeEndIso,
     );
 
     return ((result.data ?? []) as ResourceSlotRow[]).filter(
@@ -831,14 +840,19 @@ export class BookingService {
   private async getAvailabilityOverrides(
     facilityId: string,
     rangeStartIso: string,
-    rangeEndIso: string,
+    rangeEndIso?: string,
   ) {
-    const result = await this.supabase.client
+    let query = this.supabase.client
       .from('availability_override')
       .select('override_id, facility_id, resource_instance_id, start_at, end_at')
       .eq('facility_id', facilityId)
-      .lt('start_at', rangeEndIso)
       .gt('end_at', rangeStartIso);
+
+    if (rangeEndIso) {
+      query = query.lt('start_at', rangeEndIso);
+    }
+
+    const result = await query;
 
     if (result.error) {
       this.throwSupabaseError(result.error.message);
@@ -1646,6 +1660,14 @@ export class BookingService {
       dayStartIso: start.toISOString(),
       dayEndIso: end.toISOString(),
     };
+  }
+
+  private getTodayRange() {
+    const todayInMalaysia = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Kuala_Lumpur',
+    }).format(new Date());
+
+    return this.getDayRange(todayInMalaysia);
   }
 
   private formatTeeTime(isoDateTime: string) {
