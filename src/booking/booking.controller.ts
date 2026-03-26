@@ -17,13 +17,6 @@ const AvailableSlotsSchema = z.object({
   bookingDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
 });
 
-const DraftSummarySchema = z.object({
-  slotId: z.string().min(1),
-  playerCount: z.number().int().positive(),
-  caddieCount: z.number().int().min(0),
-  golfCartCount: z.number().int().min(0),
-});
-
 const CreateHoldSchema = z.object({
   slotId: z.string().min(1),
   hostName: z.string().min(1),
@@ -81,12 +74,6 @@ export class BookingController {
   getAvailableSlots(@Body() body: unknown) {
     const data = AvailableSlotsSchema.parse(body);
     return this.bookingService.fetchAvailableSlots(data);
-  }
-
-  @Post('draft-summary')
-  getDraftSummary(@Body() body: unknown) {
-    const data = DraftSummarySchema.parse(body);
-    return this.bookingService.getDraftSummary(data);
   }
 
   @Post('hold')

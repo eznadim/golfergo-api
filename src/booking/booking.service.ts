@@ -18,14 +18,14 @@ type PlayerDetail = {
   phoneNumber: string;
 };
 
-type DraftSummaryRequest = {
+type SlotSelectionRequest = {
   slotId: string;
   playerCount: number;
   caddieCount: number;
   golfCartCount: number;
 };
 
-type CreateHoldRequest = DraftSummaryRequest & {
+type CreateHoldRequest = SlotSelectionRequest & {
   hostName: string;
   hostPhoneNumber: string;
   source: SourcePlatform;
@@ -302,24 +302,6 @@ export class BookingService {
       },
       bookingDate: bookingDate ?? null,
       slots: slots.filter((item): item is NonNullable<typeof item> => item !== null),
-    };
-  }
-
-  async getDraftSummary(request: DraftSummaryRequest) {
-    const slotContext = await this.getSlotContextById(request.slotId);
-    const availability = await this.getSlotAvailability(slotContext);
-    this.ensureCapacityAvailable(request, availability);
-
-    return {
-      slotId: slotContext.slot.slot_id,
-      golfClubName: slotContext.facility.facility_name || slotContext.organization.name,
-      golfClubSlug: slotContext.organization.slug,
-      bookingDate: this.extractDate(slotContext.slot.start_at),
-      teeTimeSlot: this.formatTeeTime(slotContext.slot.start_at),
-      playerCount: request.playerCount,
-      caddieCount: request.caddieCount,
-      golfCartCount: request.golfCartCount,
-      priceBreakdown: this.calculatePriceBreakdown(availability, request),
     };
   }
 
@@ -1145,7 +1127,7 @@ export class BookingService {
   }
 
   private ensureCapacityAvailable(
-    request: DraftSummaryRequest,
+    request: BookingCounts,
     availability: SlotAvailabilitySummary,
   ) {
     if (request.playerCount > availability.playerCapacity) {
