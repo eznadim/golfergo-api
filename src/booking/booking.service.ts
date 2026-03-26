@@ -1,6 +1,5 @@
-  import {
+import {
   ConflictException,
-  GoneException,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
@@ -9,20 +8,33 @@ import { randomUUID } from 'crypto';
 import { SupabaseService } from '../supabase/supabase.service';
 
 type SourcePlatform = 'web' | 'ios' | 'android';
-type ListMode = 'upcoming' | 'past';
 type BookingStatus = 'held' | 'confirmed' | 'completed' | 'cancelled' | 'expired';
 type ResourceType = 'tee_time' | 'caddie' | 'golf_cart';
+type PlayType = '9_holes' | '18_holes';
+type PlayerCategory = 'normal' | 'senior';
+type CaddieArrangement = 'none' | 'shared' | 'per_player';
+type BuggyType = 'none' | 'normal';
+type BuggySharingPreference = 'shared' | 'mixed' | 'solo';
+type PaymentMethod = 'pay_counter';
 
 type PlayerDetail = {
   name: string;
   phoneNumber: string;
+  category: PlayerCategory;
+  isHost: boolean;
 };
 
 type SlotSelectionRequest = {
   slotId: string;
+  playType: PlayType;
+  selectedNine?: string;
   playerCount: number;
-  caddieCount: number;
-  golfCartCount: number;
+  normalPlayerCount: number;
+  seniorPlayerCount: number;
+  caddieArrangement: CaddieArrangement;
+  buggyType: BuggyType;
+  buggySharingPreference?: BuggySharingPreference;
+  paymentMethod: PaymentMethod;
 };
 
 type CreateHoldRequest = SlotSelectionRequest & {
@@ -31,13 +43,12 @@ type CreateHoldRequest = SlotSelectionRequest & {
   source: SourcePlatform;
 };
 
-type SubmitBookingRequest = {
-  bookingRef: string;
-  playerDetails: PlayerDetail[];
-};
-
 type UpdateBookingRequest = {
   hostName?: string;
+  hostPhoneNumber?: string;
+  caddieArrangement?: CaddieArrangement;
+  buggyType?: BuggyType;
+  buggySharingPreference?: BuggySharingPreference;
   playerDetails?: PlayerDetail[];
 };
 
@@ -45,6 +56,28 @@ type BookingCounts = {
   playerCount: number;
   caddieCount: number;
   golfCartCount: number;
+};
+
+type BookingConfig = {
+  playType: PlayType;
+  selectedNine: string | null;
+  playerCount: number;
+  normalPlayerCount: number;
+  seniorPlayerCount: number;
+  caddieArrangement: CaddieArrangement;
+  buggyType: BuggyType;
+  buggySharingPreference: BuggySharingPreference | null;
+  paymentMethod: PaymentMethod;
+};
+
+type BookingPricing = {
+  greenFeeTotal: number;
+  buggyEstimatedTotal: number;
+  insuranceTotal: number;
+  sstTotal: number;
+  grandTotal: number;
+  currency: string;
+  pendingCounterConfirmation: string[];
 };
 
 type GolfSport = {
@@ -199,15 +232,6 @@ type BookingAggregate = {
   resourceCatalog: ResourceCatalog;
 };
 
-type IdempotencyRow = {
-  idempotency_key: string;
-  visitor_id: string | null;
-  user_id: string | null;
-  booking_id: string | null;
-  request_type: string | null;
-  created_at: string | null;
-};
-
 const HOLD_DURATION_SECONDS = 300;
 const CURRENCY = 'MYR';
 
@@ -242,6 +266,10 @@ export class BookingService {
           name: facility.facility_name || organization.name,
           address: organization.address ?? '',
           noOfHoles: this.toNumber(facility.no_of_holes),
+          supportsNineHoles: this.toNumber(facility.no_of_holes) >= 18,
+          supportedNines: this.getSupportedNines(organization.slug),
+          buggyPolicy: 'required',
+          paymentMethods: ['pay_counter'],
           updatedAt: organization.created_at ?? new Date().toISOString(),
         };
       })
@@ -251,10 +279,15 @@ export class BookingService {
   async fetchAvailableSlots({
     golfClubSlug,
     bookingDate,
+    playType,
+    selectedNine,
   }: {
     golfClubSlug: string;
-    bookingDate?: string;
+    bookingDate: string;
+    playType: PlayType;
+    selectedNine?: string;
   }) {
+    this.assertSelectedNine(playType, selectedNine);
     const clubContext = await this.getClubContextBySlug(golfClubSlug);
     const teeSlots = await this.getTeeSlots(clubContext, bookingDate);
 
@@ -285,11 +318,11 @@ export class BookingService {
           teeTimeSlot: this.formatTeeTime(slot.start_at),
           startAt: slot.start_at,
           endAt: slot.end_at,
-          pricePerPerson: availability.teeTimeUnitPrice,
           currency: CURRENCY,
+          fromPrice: availability.teeTimeUnitPrice,
+          pricingLabel: `From ${CURRENCY} ${availability.teeTimeUnitPrice} nett`,
           remainingPlayerCapacity: availability.playerCapacity,
-          remainingCaddieCapacity: availability.caddieCapacity,
-          remainingGolfCartCapacity: availability.golfCartCapacity,
+          buggyPolicy: 'required',
           isAvailable: availability.playerCapacity > 0,
         };
       }),
@@ -300,140 +333,17 @@ export class BookingService {
         slug: clubContext.organization.slug,
         name: clubContext.facility.facility_name || clubContext.organization.name,
       },
-      bookingDate: bookingDate ?? null,
+      bookingDate,
+      playType,
+      selectedNine: playType === '9_holes' ? selectedNine ?? null : null,
       slots: slots.filter((item): item is NonNullable<typeof item> => item !== null),
-    };
-  }
-
-  async createBookingHold(
-    request: CreateHoldRequest,
-    idempotencyKey: string,
-    deviceId?: string,
-  ) {
-    const existing = await this.getExistingIdempotency(idempotencyKey);
-    if (existing?.booking_id) {
-      const aggregate = await this.getBookingAggregateById(existing.booking_id);
-      return this.buildHoldResponse(aggregate);
-    }
-
-    const slotContext = await this.getSlotContextById(request.slotId);
-    const availability = await this.getSlotAvailability(slotContext);
-    this.ensureCapacityAvailable(request, availability);
-
-    const normalizedPhoneNumber = this.normalizePhoneNumber(request.hostPhoneNumber);
-    const hostUser = await this.findOrCreateAppUser(
-      request.hostName,
-      request.hostPhoneNumber,
-      normalizedPhoneNumber,
-    );
-    const visitorId = await this.resolveVisitorId(deviceId);
-    const now = new Date().toISOString();
-    const bookingId = randomUUID();
-    const bookingRef = this.generateBookingRef();
-    const holdExpiresAt = new Date(Date.now() + HOLD_DURATION_SECONDS * 1000).toISOString();
-    const priceBreakdown = this.calculatePriceBreakdown(availability, request);
-
-    await this.insertBooking({
-      booking_id: bookingId,
-      user_id: hostUser.user_id,
-      organization_id: slotContext.organization.organization_id,
-      sport_id: slotContext.organizationSport.sport_id,
-      status: 'held',
-      total_amount: priceBreakdown.grandTotal,
-      created_at: now,
-      booking_ref: bookingRef,
-      visitor_id: visitorId,
-      slot_id: slotContext.slot.slot_id,
-      is_phone_verified: hostUser.is_phone_verified ?? false,
-      booking_source: request.source,
-      confirmed_at: null,
-      cancelled_at: null,
-      cancellation_reason: null,
-      updated_at: now,
-      hold_expires_at: holdExpiresAt,
-    });
-
-    await this.insertBookingLineItems(
-      bookingId,
-      slotContext,
-      availability,
-      {
-        playerCount: request.playerCount,
-        caddieCount: request.caddieCount,
-        golfCartCount: request.golfCartCount,
-      },
-    );
-    await this.insertBookingStatusHistory(bookingId, null, 'held');
-    await this.insertBookingIdempotency(
-      idempotencyKey,
-      visitorId,
-      hostUser.user_id,
-      bookingId,
-    );
-
-    const aggregate = await this.getBookingAggregateById(bookingId);
-    return this.buildHoldResponse(aggregate);
-  }
-
-  async submitBooking({ bookingRef, playerDetails }: SubmitBookingRequest) {
-    const aggregate = await this.getBookingAggregateByRef(bookingRef);
-    const displayStatus = this.getDisplayStatus(aggregate.booking);
-
-    if (displayStatus === 'expired') {
-      throw new GoneException('Booking hold has expired');
-    }
-
-    if (displayStatus !== 'held') {
-      throw new ConflictException('Booking is not in held status');
-    }
-
-    await this.replaceBookingPlayers(
-      aggregate.booking.booking_id,
-      playerDetails.map((player) => ({
-        name: player.name,
-        phone_number: this.normalizePhoneNumber(player.phoneNumber),
-      })),
-    );
-
-    const now = new Date().toISOString();
-    await this.updateBookingRow(aggregate.booking.booking_id, {
-      status: 'confirmed',
-      confirmed_at: now,
-      hold_expires_at: null,
-      updated_at: now,
-    });
-    await this.insertBookingStatusHistory(aggregate.booking.booking_id, 'held', 'confirmed');
-
-    const refreshed = await this.getBookingAggregateById(aggregate.booking.booking_id);
-    const counts = this.extractCountsFromLineItems(
-      refreshed.lineItems,
-      refreshed.resourceCatalog,
-    );
-
-    return {
-      bookingId: refreshed.booking.booking_id,
-      bookingRef: refreshed.booking.booking_ref,
-      status: refreshed.booking.status,
-      confirmedAt: refreshed.booking.confirmed_at,
-      bookingSummary: {
-        golfClubName: refreshed.facility?.facility_name ?? refreshed.organization.name,
-        bookingDate: this.extractDate(refreshed.slot.start_at),
-        teeTimeSlot: this.formatTeeTime(refreshed.slot.start_at),
-        playerCount: counts.playerCount,
-        caddieCount: counts.caddieCount,
-        golfCartCount: counts.golfCartCount,
-        grandTotal: this.toNumber(refreshed.booking.total_amount),
-        currency: CURRENCY,
-      },
     };
   }
 
   async fetchBookingDetails(bookingRef: string) {
     const aggregate = await this.getBookingAggregateByRef(bookingRef);
-    const counts = this.extractCountsFromLineItems(
-      aggregate.lineItems,
-      aggregate.resourceCatalog,
-    );
+    const config = this.extractBookingConfig(aggregate.lineItems);
+    const pricing = this.calculatePricingFromLineItems(aggregate.lineItems, aggregate.resourceCatalog);
 
     return {
       bookingRef: aggregate.booking.booking_ref,
@@ -443,114 +353,30 @@ export class BookingService {
       golfClubSlug: aggregate.organization.slug,
       bookingDate: this.extractDate(aggregate.slot.start_at),
       teeTimeSlot: this.formatTeeTime(aggregate.slot.start_at),
+      playType: config.playType,
+      selectedNine: config.selectedNine,
       hostName: aggregate.hostUser?.name ?? '',
       hostPhoneNumber:
         aggregate.hostUser?.phone_normalized ?? aggregate.hostUser?.phone ?? '',
-      playerCount: counts.playerCount,
-      caddieCount: counts.caddieCount,
-      golfCartCount: counts.golfCartCount,
+      playerCount: config.playerCount,
+      normalPlayerCount: config.normalPlayerCount,
+      seniorPlayerCount: config.seniorPlayerCount,
+      caddieArrangement: config.caddieArrangement,
+      buggyType: config.buggyType,
+      buggySharingPreference: config.buggySharingPreference,
+      paymentMethod: config.paymentMethod,
       playerDetails: aggregate.players.map((player) => ({
         name: player.name,
         phoneNumber: player.phone_number,
+        category: player.category === 'senior' ? 'senior' : 'normal',
+        isHost:
+          (aggregate.hostUser?.phone_normalized ?? aggregate.hostUser?.phone ?? '') ===
+          player.phone_number,
       })),
-      pricing: {
-        grandTotal: this.toNumber(aggregate.booking.total_amount),
-        currency: CURRENCY,
-      },
+      pricing,
       holdExpiresAt: aggregate.booking.hold_expires_at,
       createdAt: aggregate.booking.created_at,
-    };
-  }
-
-  async fetchBookingList(mode: ListMode, pagination: { page: number; pageSize: number }) {
-    const bookings = await this.getBookingRowsForList();
-    const aggregates = await Promise.all(
-      bookings.map((booking) => this.buildBookingAggregate(booking)),
-    );
-
-    const now = Date.now();
-    const filtered = aggregates.filter((aggregate) => {
-      if (this.getDisplayStatus(aggregate.booking) === 'expired') {
-        return false;
-      }
-
-      const slotTime = new Date(aggregate.slot.start_at).getTime();
-      return mode === 'upcoming' ? slotTime >= now : slotTime < now;
-    });
-
-    const items = filtered
-      .sort(
-        (left, right) =>
-          new Date(left.slot.start_at).getTime() - new Date(right.slot.start_at).getTime(),
-      )
-      .map((aggregate) => ({
-        bookingRef: aggregate.booking.booking_ref,
-        status: this.getDisplayStatus(aggregate.booking),
-        golfClubName: aggregate.facility?.facility_name ?? aggregate.organization.name,
-        bookingDate: this.extractDate(aggregate.slot.start_at),
-        teeTimeSlot: this.formatTeeTime(aggregate.slot.start_at),
-        grandTotal: this.toNumber(aggregate.booking.total_amount),
-        currency: CURRENCY,
-      }));
-
-    const startIndex = (pagination.page - 1) * pagination.pageSize;
-    return {
-      page: pagination.page,
-      pageSize: pagination.pageSize,
-      total: items.length,
-      items: items.slice(startIndex, startIndex + pagination.pageSize),
-    };
-  }
-
-  async updateBookingDetails(bookingRef: string, updates: UpdateBookingRequest) {
-    const aggregate = await this.getBookingAggregateByRef(bookingRef);
-
-    if (updates.hostName && aggregate.booking.user_id) {
-      await this.updateAppUser(aggregate.booking.user_id, { name: updates.hostName });
-    }
-
-    if (updates.playerDetails) {
-      await this.replaceBookingPlayers(
-        aggregate.booking.booking_id,
-        updates.playerDetails.map((player) => ({
-          name: player.name,
-          phone_number: this.normalizePhoneNumber(player.phoneNumber),
-        })),
-      );
-    }
-
-    const now = new Date().toISOString();
-    await this.updateBookingRow(aggregate.booking.booking_id, { updated_at: now });
-
-    return {
-      bookingRef: aggregate.booking.booking_ref,
-      status: this.getDisplayStatus(aggregate.booking),
-      updatedAt: now,
-    };
-  }
-
-  async cancelBooking(bookingRef: string, reason: string) {
-    const aggregate = await this.getBookingAggregateByRef(bookingRef);
-    const oldStatus = this.getDisplayStatus(aggregate.booking);
-    const now = new Date().toISOString();
-
-    await this.updateBookingRow(aggregate.booking.booking_id, {
-      status: 'cancelled',
-      cancelled_at: now,
-      cancellation_reason: reason,
-      hold_expires_at: null,
-      updated_at: now,
-    });
-    await this.insertBookingStatusHistory(
-      aggregate.booking.booking_id,
-      oldStatus === 'expired' ? 'held' : oldStatus,
-      'cancelled',
-    );
-
-    return {
-      bookingRef: aggregate.booking.booking_ref,
-      status: 'cancelled',
-      cancelledAt: now,
+      updatedAt: aggregate.booking.updated_at,
     };
   }
 
@@ -843,7 +669,7 @@ export class BookingService {
     return (result.data ?? []) as AvailabilityOverrideRow[];
   }
 
-  private async getSlotContextById(slotId: string): Promise<SlotContext> {
+  async getSlotContextById(slotId: string): Promise<SlotContext> {
     const slotResult = await this.supabase.client
       .from('resource_slot')
       .select('slot_id, resource_instance_id, start_at, end_at, base_price')
@@ -940,7 +766,7 @@ export class BookingService {
     };
   }
 
-  private async getSlotAvailability(
+  async getSlotAvailability(
     slotContext: SlotContext,
     bookingDate = this.extractDate(slotContext.slot.start_at),
   ): Promise<SlotAvailabilitySummary> {
@@ -1126,7 +952,7 @@ export class BookingService {
     );
   }
 
-  private ensureCapacityAvailable(
+  ensureCapacityAvailable(
     request: BookingCounts,
     availability: SlotAvailabilitySummary,
   ) {
@@ -1141,39 +967,7 @@ export class BookingService {
     }
   }
 
-  private calculatePriceBreakdown(
-    availability: SlotAvailabilitySummary,
-    request: BookingCounts,
-  ) {
-    const greenFeeTotal = availability.teeTimeUnitPrice * request.playerCount;
-    const caddieTotal = availability.caddieUnitPrice * request.caddieCount;
-    const golfCartTotal = availability.golfCartUnitPrice * request.golfCartCount;
-
-    return {
-      greenFeePerPerson: availability.teeTimeUnitPrice,
-      greenFeeTotal,
-      caddieTotal,
-      golfCartTotal,
-      grandTotal: greenFeeTotal + caddieTotal + golfCartTotal,
-      currency: CURRENCY,
-    };
-  }
-
-  private async getExistingIdempotency(idempotencyKey: string) {
-    const result = await this.supabase.client
-      .from('booking_idempotency')
-      .select('idempotency_key, visitor_id, user_id, booking_id, request_type, created_at')
-      .eq('idempotency_key', idempotencyKey)
-      .maybeSingle<IdempotencyRow>();
-
-    if (result.error) {
-      this.throwSupabaseError(result.error.message);
-    }
-
-    return result.data;
-  }
-
-  private async findOrCreateAppUser(
+  async findOrCreateAppUser(
     name: string,
     rawPhoneNumber: string,
     normalizedPhoneNumber: string,
@@ -1214,7 +1008,7 @@ export class BookingService {
     return inserted.data;
   }
 
-  private async resolveVisitorId(deviceId?: string) {
+  async resolveVisitorId(deviceId?: string) {
     if (!deviceId) {
       return null;
     }
@@ -1232,18 +1026,20 @@ export class BookingService {
     return result.data?.id ?? null;
   }
 
-  private async insertBooking(payload: Record<string, unknown>) {
+  async insertBooking(payload: Record<string, unknown>) {
     const result = await this.supabase.client.from('booking').insert(payload);
     if (result.error) {
       this.throwSupabaseError(result.error.message);
     }
   }
 
-  private async insertBookingLineItems(
+  async insertBookingLineItems(
     bookingId: string,
     slotContext: SlotContext,
     availability: SlotAvailabilitySummary,
     counts: BookingCounts,
+    bookingConfig: BookingConfig,
+    pricing: BookingPricing,
   ) {
     const items: Record<string, unknown>[] = [
       {
@@ -1255,7 +1051,11 @@ export class BookingService {
         quantity: counts.playerCount,
         unit_price: availability.teeTimeUnitPrice,
         total_price: availability.teeTimeUnitPrice * counts.playerCount,
-        metadata: { resourceType: 'tee_time' },
+        metadata: {
+          resourceType: 'tee_time',
+          bookingConfig,
+          pricing,
+        },
       },
     ];
 
@@ -1293,7 +1093,7 @@ export class BookingService {
     }
   }
 
-  private async insertBookingStatusHistory(
+  async insertBookingStatusHistory(
     bookingId: string,
     oldStatus: string | null,
     newStatus: string,
@@ -1312,27 +1112,7 @@ export class BookingService {
     }
   }
 
-  private async insertBookingIdempotency(
-    idempotencyKey: string,
-    visitorId: string | null,
-    userId: string,
-    bookingId: string,
-  ) {
-    const result = await this.supabase.client.from('booking_idempotency').insert({
-      idempotency_key: idempotencyKey,
-      visitor_id: visitorId,
-      user_id: userId,
-      booking_id: bookingId,
-      request_type: 'booking_hold',
-      created_at: new Date().toISOString(),
-    });
-
-    if (result.error) {
-      this.throwSupabaseError(result.error.message);
-    }
-  }
-
-  private async getBookingAggregateByRef(bookingRef: string) {
+  async getBookingAggregateByRef(bookingRef: string) {
     const result = await this.supabase.client
       .from('booking')
       .select(
@@ -1352,7 +1132,7 @@ export class BookingService {
     return this.buildBookingAggregate(result.data);
   }
 
-  private async getBookingAggregateById(bookingId: string) {
+  async getBookingAggregateById(bookingId: string) {
     const result = await this.supabase.client
       .from('booking')
       .select(
@@ -1372,7 +1152,7 @@ export class BookingService {
     return this.buildBookingAggregate(result.data);
   }
 
-  private async buildBookingAggregate(booking: BookingRow): Promise<BookingAggregate> {
+  async buildBookingAggregate(booking: BookingRow): Promise<BookingAggregate> {
     const organizationPromise = this.supabase.client
       .from('organization')
       .select('organization_id, name, address, slug, created_at')
@@ -1449,9 +1229,9 @@ export class BookingService {
     };
   }
 
-  private async replaceBookingPlayers(
+  async replaceBookingPlayers(
     bookingId: string,
-    players: Array<{ name: string; phone_number: string }>,
+    players: Array<{ name: string; phone_number: string; category: PlayerCategory }>,
   ) {
     const deleted = await this.supabase.client
       .from('booking_player')
@@ -1472,7 +1252,7 @@ export class BookingService {
         booking_id: bookingId,
         name: player.name,
         phone_number: player.phone_number,
-        category: null,
+        category: player.category,
         handicap: null,
         created_at: new Date().toISOString(),
       })),
@@ -1483,7 +1263,7 @@ export class BookingService {
     }
   }
 
-  private async updateBookingRow(bookingId: string, patch: Record<string, unknown>) {
+  async updateBookingRow(bookingId: string, patch: Record<string, unknown>) {
     const result = await this.supabase.client
       .from('booking')
       .update(patch)
@@ -1494,7 +1274,7 @@ export class BookingService {
     }
   }
 
-  private async updateAppUser(userId: string, patch: Record<string, unknown>) {
+  async updateAppUser(userId: string, patch: Record<string, unknown>) {
     const result = await this.supabase.client
       .from('app_user')
       .update({
@@ -1508,7 +1288,7 @@ export class BookingService {
     }
   }
 
-  private async getBookingRowsForList() {
+  async getBookingRowsForList() {
     const result = await this.supabase.client
       .from('booking')
       .select(
@@ -1523,11 +1303,8 @@ export class BookingService {
     return (result.data ?? []) as BookingRow[];
   }
 
-  private buildHoldResponse(aggregate: BookingAggregate) {
-    const counts = this.extractCountsFromLineItems(
-      aggregate.lineItems,
-      aggregate.resourceCatalog,
-    );
+  buildHoldResponse(aggregate: BookingAggregate) {
+    const config = this.extractBookingConfig(aggregate.lineItems);
     const pricing = this.calculatePricingFromLineItems(
       aggregate.lineItems,
       aggregate.resourceCatalog,
@@ -1551,22 +1328,31 @@ export class BookingService {
         golfClubSlug: aggregate.organization.slug,
         bookingDate: this.extractDate(aggregate.slot.start_at),
         teeTimeSlot: this.formatTeeTime(aggregate.slot.start_at),
-        playerCount: counts.playerCount,
-        caddieCount: counts.caddieCount,
-        golfCartCount: counts.golfCartCount,
-        priceBreakdown: pricing,
+        playType: config.playType,
+        selectedNine: config.selectedNine,
+        playerCount: config.playerCount,
+        normalPlayerCount: config.normalPlayerCount,
+        seniorPlayerCount: config.seniorPlayerCount,
+        caddieArrangement: config.caddieArrangement,
+        buggyType: config.buggyType,
+        buggySharingPreference: config.buggySharingPreference,
+        pricing,
+        paymentMethod: config.paymentMethod,
       },
     };
   }
 
-  private calculatePricingFromLineItems(
+  calculatePricingFromLineItems(
     lineItems: BookingLineItemRow[],
     resourceCatalog: ResourceCatalog,
-  ) {
-    let greenFeePerPerson = 0;
+  ): BookingPricing {
+    const storedPricing = this.extractStoredPricing(lineItems);
+    if (storedPricing) {
+      return storedPricing;
+    }
+
     let greenFeeTotal = 0;
-    let caddieTotal = 0;
-    let golfCartTotal = 0;
+    let buggyEstimatedTotal = 0;
 
     for (const lineItem of lineItems) {
       const resource = resourceCatalog.byId.get(lineItem.resource_id);
@@ -1579,26 +1365,185 @@ export class BookingService {
       const totalPrice = this.toNumber(lineItem.total_price);
 
       if (resource.resource_type === 'tee_time') {
-        greenFeePerPerson = quantity > 0 ? unitPrice : greenFeePerPerson;
         greenFeeTotal += totalPrice;
-      } else if (resource.resource_type === 'caddie') {
-        caddieTotal += totalPrice;
       } else if (resource.resource_type === 'golf_cart') {
-        golfCartTotal += totalPrice;
+        buggyEstimatedTotal += totalPrice;
       }
     }
 
+    const insuranceTotal = this.calculateInsuranceTotal(
+      this.extractBookingConfig(lineItems).playerCount,
+    );
+    const sstTotal = this.calculateSstTotal(greenFeeTotal);
+
     return {
-      greenFeePerPerson,
       greenFeeTotal,
-      caddieTotal,
-      golfCartTotal,
-      grandTotal: greenFeeTotal + caddieTotal + golfCartTotal,
+      buggyEstimatedTotal,
+      insuranceTotal,
+      sstTotal,
+      grandTotal: greenFeeTotal + buggyEstimatedTotal + insuranceTotal + sstTotal,
       currency: CURRENCY,
+      pendingCounterConfirmation:
+        this.extractBookingConfig(lineItems).caddieArrangement === 'none' ? [] : ['caddie'],
     };
   }
 
-  private getDisplayStatus(booking: BookingRow): BookingStatus {
+  validateHoldRequest(request: CreateHoldRequest) {
+    this.assertSelectedNine(request.playType, request.selectedNine);
+    if (request.playerCount !== request.normalPlayerCount + request.seniorPlayerCount) {
+      throw new ConflictException('Player category totals must match playerCount');
+    }
+    if (request.buggyType === 'none' && request.buggySharingPreference) {
+      throw new ConflictException('Buggy sharing preference is not applicable when buggyType is none');
+    }
+  }
+
+  private assertSelectedNine(playType: PlayType, selectedNine?: string | null) {
+    if (playType === '9_holes' && !selectedNine) {
+      throw new ConflictException('selectedNine is required for 9_holes play type');
+    }
+  }
+
+  buildBookingConfig(request: SlotSelectionRequest): BookingConfig {
+    return {
+      playType: request.playType,
+      selectedNine: request.playType === '9_holes' ? request.selectedNine ?? null : null,
+      playerCount: request.playerCount,
+      normalPlayerCount: request.normalPlayerCount,
+      seniorPlayerCount: request.seniorPlayerCount,
+      caddieArrangement: request.caddieArrangement,
+      buggyType: request.buggyType,
+      buggySharingPreference:
+        request.buggyType === 'none' ? null : request.buggySharingPreference ?? 'shared',
+      paymentMethod: request.paymentMethod,
+    };
+  }
+
+  getRequestedBookingCounts(config: BookingConfig) {
+    return {
+      playerCount: config.playerCount,
+      caddieCount:
+        config.caddieArrangement === 'per_player'
+          ? config.playerCount
+          : config.caddieArrangement === 'shared'
+            ? 1
+            : 0,
+      golfCartCount:
+        config.buggyType === 'none'
+          ? 0
+          : config.buggySharingPreference === 'solo'
+            ? config.playerCount
+            : Math.ceil(config.playerCount / 2),
+    };
+  }
+
+  calculateBookingPricing(
+    availability: SlotAvailabilitySummary,
+    config: BookingConfig,
+    counts: BookingCounts,
+  ): BookingPricing {
+    const greenFeeTotal = availability.teeTimeUnitPrice * config.playerCount;
+    const buggyEstimatedTotal = availability.golfCartUnitPrice * counts.golfCartCount;
+    const insuranceTotal = this.calculateInsuranceTotal(config.playerCount);
+    const sstTotal = this.calculateSstTotal(greenFeeTotal);
+
+    return {
+      greenFeeTotal,
+      buggyEstimatedTotal,
+      insuranceTotal,
+      sstTotal,
+      grandTotal: greenFeeTotal + buggyEstimatedTotal + insuranceTotal + sstTotal,
+      currency: CURRENCY,
+      pendingCounterConfirmation: config.caddieArrangement === 'none' ? [] : ['caddie'],
+    };
+  }
+
+  private calculateInsuranceTotal(playerCount: number) {
+    return playerCount * 3;
+  }
+
+  private calculateSstTotal(greenFeeTotal: number) {
+    return Math.round(greenFeeTotal * 0.06);
+  }
+
+  extractBookingConfig(lineItems: BookingLineItemRow[]): BookingConfig {
+    const teeLineItem = lineItems.find(
+      (lineItem) => lineItem.metadata?.resourceType === 'tee_time',
+    );
+    const metadata = teeLineItem?.metadata?.bookingConfig as Partial<BookingConfig> | undefined;
+    const playerCount = this.toNumber(teeLineItem?.quantity ?? 0);
+
+    return {
+      playType: metadata?.playType === '9_holes' ? '9_holes' : '18_holes',
+      selectedNine: metadata?.selectedNine ?? null,
+      playerCount: metadata?.playerCount ?? playerCount,
+      normalPlayerCount: metadata?.normalPlayerCount ?? playerCount,
+      seniorPlayerCount: metadata?.seniorPlayerCount ?? 0,
+      caddieArrangement: metadata?.caddieArrangement ?? 'none',
+      buggyType: metadata?.buggyType ?? 'none',
+      buggySharingPreference: metadata?.buggySharingPreference ?? null,
+      paymentMethod: metadata?.paymentMethod ?? 'pay_counter',
+    };
+  }
+
+  private extractStoredPricing(lineItems: BookingLineItemRow[]): BookingPricing | null {
+    const teeLineItem = lineItems.find(
+      (lineItem) => lineItem.metadata?.resourceType === 'tee_time',
+    );
+    const pricing = teeLineItem?.metadata?.pricing as BookingPricing | undefined;
+    return pricing ?? null;
+  }
+
+  async updateBookingConfig(
+    bookingId: string,
+    currentConfig: BookingConfig,
+    updates: UpdateBookingRequest,
+  ) {
+    const nextConfig: BookingConfig = {
+      ...currentConfig,
+      caddieArrangement: updates.caddieArrangement ?? currentConfig.caddieArrangement,
+      buggyType: updates.buggyType ?? currentConfig.buggyType,
+      buggySharingPreference:
+        updates.buggyType === 'none'
+          ? null
+          : updates.buggySharingPreference ?? currentConfig.buggySharingPreference,
+    };
+
+    const result = await this.supabase.client
+      .from('booking_line_item')
+      .select(
+        'booking_line_item_id, booking_id, resource_id, resource_instance_id, slot_id, quantity, unit_price, total_price, metadata',
+      )
+      .eq('booking_id', bookingId);
+
+    if (result.error) {
+      this.throwSupabaseError(result.error.message);
+    }
+
+    const teeLineItem = ((result.data ?? []) as BookingLineItemRow[]).find(
+      (lineItem) => lineItem.metadata?.resourceType === 'tee_time',
+    );
+
+    if (!teeLineItem) {
+      return;
+    }
+
+    const updatedMetadata = {
+      ...(teeLineItem.metadata ?? {}),
+      bookingConfig: nextConfig,
+    };
+
+    const updateResult = await this.supabase.client
+      .from('booking_line_item')
+      .update({ metadata: updatedMetadata })
+      .eq('booking_line_item_id', teeLineItem.booking_line_item_id);
+
+    if (updateResult.error) {
+      this.throwSupabaseError(updateResult.error.message);
+    }
+  }
+
+  getDisplayStatus(booking: BookingRow): BookingStatus {
     if (booking.status === 'held' && this.isHoldExpired(booking)) {
       return 'expired';
     }
@@ -1614,22 +1559,7 @@ export class BookingService {
     );
   }
 
-  private normalizePhoneNumber(phoneNumber: string) {
-    const trimmed = phoneNumber.trim();
-    const digits = trimmed.replace(/[^\d]/g, '');
-
-    if (trimmed.startsWith('+')) {
-      return `+${digits}`;
-    }
-
-    if (digits.startsWith('60')) {
-      return `+${digits}`;
-    }
-
-    return digits;
-  }
-
-  private generateBookingRef() {
+  generateBookingRef() {
     return `BK-${randomUUID().replace(/-/g, '').slice(0, 8).toUpperCase()}`;
   }
 
@@ -1652,7 +1582,7 @@ export class BookingService {
     return this.getDayRange(todayInMalaysia);
   }
 
-  private formatTeeTime(isoDateTime: string) {
+  formatTeeTime(isoDateTime: string) {
     return new Intl.DateTimeFormat('en-MY', {
       hour: '2-digit',
       minute: '2-digit',
@@ -1661,7 +1591,7 @@ export class BookingService {
     }).format(new Date(isoDateTime));
   }
 
-  private extractDate(isoDateTime: string) {
+  extractDate(isoDateTime: string) {
     return new Date(isoDateTime).toISOString().slice(0, 10);
   }
 
@@ -1705,13 +1635,21 @@ export class BookingService {
     );
   }
 
-  private toNumber(value: number | string | null | undefined) {
+  toNumber(value: number | string | null | undefined) {
     if (value === null || value === undefined) {
       return 0;
     }
 
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  private getSupportedNines(clubSlug: string) {
+    const supportedNinesByClub: Record<string, string[]> = {
+      'kinrara-golf-club': ['damai', 'sutera'],
+    };
+
+    return supportedNinesByClub[clubSlug] ?? ['front-nine', 'back-nine'];
   }
 
   private throwSupabaseError(message: string): never {
