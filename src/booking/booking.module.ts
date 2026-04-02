@@ -12,9 +12,10 @@ import { BookingSlotService } from './booking-slot.service';
 import { BookingSubmitService } from './booking-submit.service';
 import { BookingUpdateService } from './booking-update.service';
 import { SupabaseModule } from '../supabase/supabase.module';
+import { AuthModule } from '../auth/auth.module';
 
 @Module({
-  imports: [SupabaseModule],
+  imports: [SupabaseModule, AuthModule],
   controllers: [BookingController],
   providers: [
     BookingService,

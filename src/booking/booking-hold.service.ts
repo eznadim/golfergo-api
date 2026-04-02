@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { ConflictException, Injectable } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { BookingService } from './booking.service';
 import { IdempotencyService } from './idempotency.service';
@@ -20,6 +20,7 @@ export class BookingHoldService {
       source: 'web' | 'ios' | 'android';
     },
     idempotencyKey: string,
+    userId: string,
     deviceId?: string,
   ) {
     const existing =
@@ -38,11 +39,23 @@ export class BookingHoldService {
     const normalizedPhoneNumber = this.phoneService.normalizePhoneNumber(
       input.hostPhoneNumber,
     );
-    const hostUser = await this.bookingService.findOrCreateAppUser(
-      input.hostName,
-      input.hostPhoneNumber,
-      normalizedPhoneNumber,
-    );
+    const hostUser = await this.bookingService.getAppUserById(userId);
+
+    if (
+      hostUser.phone_normalized &&
+      hostUser.phone_normalized !== normalizedPhoneNumber
+    ) {
+      throw new ConflictException(
+        'Authenticated user phone number must match the booking host phone number',
+      );
+    }
+
+    await this.bookingService.updateAppUser(hostUser.user_id, {
+      name: input.hostName,
+      phone: input.hostPhoneNumber,
+      phone_normalized: normalizedPhoneNumber,
+      is_phone_verified: true,
+    });
     const visitorId = await this.bookingService.resolveVisitorId(deviceId);
     const now = new Date().toISOString();
     const bookingId = randomUUID();
@@ -60,7 +73,7 @@ export class BookingHoldService {
       booking_ref: bookingRef,
       visitor_id: visitorId,
       slot_id: slotContext.slot.slot_id,
-      is_phone_verified: hostUser.is_phone_verified ?? false,
+      is_phone_verified: true,
       booking_source: input.source,
       confirmed_at: null,
       cancelled_at: null,

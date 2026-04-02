@@ -1,10 +1,15 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { SupabaseModule } from '../supabase/supabase.module';
+import { AppAuthGuard } from './app-auth.guard';
+import { AuthController } from './auth.controller';
+import { AuthService } from './auth.service';
 import { SupabaseJwtGuard } from './jwt.guard';
 
 @Module({
-  imports: [ConfigModule],           // uses the global ConfigModule you enabled
-  providers: [SupabaseJwtGuard],     // makes the guard injectable
-  exports: [SupabaseJwtGuard],       // lets other modules use it
+  imports: [ConfigModule, SupabaseModule],
+  controllers: [AuthController],
+  providers: [AuthService, SupabaseJwtGuard, AppAuthGuard],
+  exports: [AuthService, SupabaseJwtGuard, AppAuthGuard],
 })
 export class AuthModule {}

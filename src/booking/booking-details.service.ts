@@ -5,7 +5,9 @@ import { BookingService } from './booking.service';
 export class BookingDetailsService {
   constructor(private readonly bookingService: BookingService) {}
 
-  fetchBookingDetails(bookingRef: string) {
+  async fetchBookingDetails(bookingRef: string, userId: string) {
+    const aggregate = await this.bookingService.getBookingAggregateByRef(bookingRef);
+    this.bookingService.assertBookingOwnedByUser(aggregate.booking, userId);
     return this.bookingService.fetchBookingDetails(bookingRef);
   }
 }

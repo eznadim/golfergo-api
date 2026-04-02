@@ -8,8 +8,11 @@ import {
   Post,
   Put,
   Query,
+  Req,
+  UseGuards,
 } from '@nestjs/common';
 import { z } from 'zod';
+import { AppAuthGuard } from '../auth/app-auth.guard';
 import { BookingCancelService } from './booking-cancel.service';
 import { BookingClubService } from './booking-club.service';
 import { BookingDetailsService } from './booking-details.service';
@@ -102,64 +105,103 @@ export class BookingController {
   }
 
   @Post('hold')
+  @UseGuards(AppAuthGuard)
   createBookingHold(
     @Body() body: unknown,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Headers('x-device-id') deviceId: string | undefined,
+    @Req() req: { appUser?: { sub: string } },
   ) {
     if (!idempotencyKey) {
       throw new BadRequestException('Idempotency-Key header is required');
     }
 
     const data = CreateHoldSchema.parse(body);
-    return this.bookingHoldService.createBookingHold(data, idempotencyKey, deviceId);
+    return this.bookingHoldService.createBookingHold(
+      data,
+      idempotencyKey,
+      req.appUser?.sub ?? '',
+      deviceId,
+    );
   }
 
   @Post('submit')
-  submitBooking(@Body() body: unknown) {
+  @UseGuards(AppAuthGuard)
+  submitBooking(
+    @Body() body: unknown,
+    @Req() req: { appUser?: { sub: string } },
+  ) {
     const data = SubmitBookingSchema.parse(body);
-    return this.bookingSubmitService.submitBooking(data);
+    return this.bookingSubmitService.submitBooking(data, req.appUser?.sub ?? '');
   }
 
   @Get('list/upcoming')
+  @UseGuards(AppAuthGuard)
   fetchUpcomingBookings(
+    @Req() req: { appUser?: { sub: string } },
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
   ) {
     return this.bookingListService.fetchUpcomingBookings({
+      userId: req.appUser?.sub ?? '',
       page: parsePositiveInteger(page, 1, 'page'),
       pageSize: parsePositiveInteger(pageSize, 20, 'pageSize'),
     });
   }
 
   @Get('list/past')
+  @UseGuards(AppAuthGuard)
   fetchPastBookings(
+    @Req() req: { appUser?: { sub: string } },
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
   ) {
     return this.bookingListService.fetchPastBookings({
+      userId: req.appUser?.sub ?? '',
       page: parsePositiveInteger(page, 1, 'page'),
       pageSize: parsePositiveInteger(pageSize, 20, 'pageSize'),
     });
   }
 
   @Get(':bookingRef')
-  fetchBookingDetails(@Param('bookingRef') bookingRef: string) {
-    return this.bookingDetailsService.fetchBookingDetails(bookingRef);
+  @UseGuards(AppAuthGuard)
+  fetchBookingDetails(
+    @Param('bookingRef') bookingRef: string,
+    @Req() req: { appUser?: { sub: string } },
+  ) {
+    return this.bookingDetailsService.fetchBookingDetails(
+      bookingRef,
+      req.appUser?.sub ?? '',
+    );
   }
 
   @Put(':bookingRef')
+  @UseGuards(AppAuthGuard)
   updateBookingDetails(
     @Param('bookingRef') bookingRef: string,
     @Body() body: unknown,
+    @Req() req: { appUser?: { sub: string } },
   ) {
     const data = UpdateBookingSchema.parse(body);
-    return this.bookingUpdateService.updateBookingDetails(bookingRef, data);
+    return this.bookingUpdateService.updateBookingDetails(
+      bookingRef,
+      data,
+      req.appUser?.sub ?? '',
+    );
   }
 
   @Post(':bookingRef/cancel')
-  cancelBooking(@Param('bookingRef') bookingRef: string, @Body() body: unknown) {
+  @UseGuards(AppAuthGuard)
+  cancelBooking(
+    @Param('bookingRef') bookingRef: string,
+    @Body() body: unknown,
+    @Req() req: { appUser?: { sub: string } },
+  ) {
     const data = CancelBookingSchema.parse(body);
-    return this.bookingCancelService.cancelBooking(bookingRef, data.reason);
+    return this.bookingCancelService.cancelBooking(
+      bookingRef,
+      data.reason,
+      req.appUser?.sub ?? '',
+    );
   }
 }
