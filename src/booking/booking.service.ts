@@ -1,5 +1,6 @@
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
@@ -1125,6 +1126,30 @@ export class BookingService {
     return inserted.data;
   }
 
+  async getAppUserById(userId: string) {
+    const result = await this.supabase.client
+      .from('app_user')
+      .select('user_id, name, phone, phone_normalized, is_phone_verified')
+      .eq('user_id', userId)
+      .maybeSingle<AppUserRow>();
+
+    if (result.error) {
+      this.throwSupabaseError(result.error.message);
+    }
+
+    if (!result.data) {
+      throw new NotFoundException('App user not found');
+    }
+
+    return result.data;
+  }
+
+  assertBookingOwnedByUser(booking: BookingRow, userId: string) {
+    if (booking.user_id !== userId) {
+      throw new ForbiddenException('You do not have access to this booking');
+    }
+  }
+
   async resolveVisitorId(deviceId?: string) {
     if (!deviceId) {
       return null;
@@ -1438,6 +1463,22 @@ export class BookingService {
       .select(
         'booking_id, user_id, organization_id, sport_id, status, total_amount, created_at, booking_ref, visitor_id, slot_id, is_phone_verified, booking_source, confirmed_at, cancelled_at, cancellation_reason, updated_at, hold_expires_at, play_type, selected_nine, buggy_type, buggy_sharing_preference, caddy_arrangement, payment_method, estimated_total_amount',
       )
+      .order('created_at', { ascending: false });
+
+    if (result.error) {
+      this.throwSupabaseError(result.error.message);
+    }
+
+    return (result.data ?? []) as BookingRow[];
+  }
+
+  async getBookingRowsForUser(userId: string) {
+    const result = await this.supabase.client
+      .from('booking')
+      .select(
+        'booking_id, user_id, organization_id, sport_id, status, total_amount, created_at, booking_ref, visitor_id, slot_id, is_phone_verified, booking_source, confirmed_at, cancelled_at, cancellation_reason, updated_at, hold_expires_at, play_type, selected_nine, buggy_type, buggy_sharing_preference, caddy_arrangement, payment_method, estimated_total_amount',
+      )
+      .eq('user_id', userId)
       .order('created_at', { ascending: false });
 
     if (result.error) {

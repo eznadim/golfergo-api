@@ -5,19 +5,27 @@ import { BookingService } from './booking.service';
 export class BookingListService {
   constructor(private readonly bookingService: BookingService) {}
 
-  fetchUpcomingBookings(pagination: { page: number; pageSize: number }) {
+  fetchUpcomingBookings(pagination: {
+    userId: string;
+    page: number;
+    pageSize: number;
+  }) {
     return this.fetchBookingList('upcoming', pagination);
   }
 
-  fetchPastBookings(pagination: { page: number; pageSize: number }) {
+  fetchPastBookings(pagination: {
+    userId: string;
+    page: number;
+    pageSize: number;
+  }) {
     return this.fetchBookingList('past', pagination);
   }
 
   private async fetchBookingList(
     mode: 'upcoming' | 'past',
-    pagination: { page: number; pageSize: number },
+    pagination: { userId: string; page: number; pageSize: number },
   ) {
-    const bookings = await this.bookingService.getBookingRowsForList();
+    const bookings = await this.bookingService.getBookingRowsForUser(pagination.userId);
     const aggregates = await Promise.all(
       bookings.map((booking) => this.bookingService.buildBookingAggregate(booking)),
     );

@@ -21,10 +21,11 @@ export class BookingSubmitService {
       isHost: boolean;
     }>;
     acknowledgedTerms: true;
-  }) {
+  }, userId: string) {
     const aggregate = await this.bookingService.getBookingAggregateByRef(
       input.bookingRef,
     );
+    this.bookingService.assertBookingOwnedByUser(aggregate.booking, userId);
     const displayStatus = this.bookingService.getDisplayStatus(aggregate.booking);
 
     if (displayStatus === 'expired') {

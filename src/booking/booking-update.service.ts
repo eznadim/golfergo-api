@@ -24,8 +24,10 @@ export class BookingUpdateService {
         isHost: boolean;
       }>;
     },
+    userId: string,
   ) {
     const aggregate = await this.bookingService.getBookingAggregateByRef(bookingRef);
+    this.bookingService.assertBookingOwnedByUser(aggregate.booking, userId);
     const currentConfig = this.bookingService.extractBookingConfig(aggregate.lineItems);
 
     if (input.hostName && aggregate.booking.user_id) {

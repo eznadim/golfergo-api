@@ -5,8 +5,9 @@ import { BookingService } from './booking.service';
 export class BookingCancelService {
   constructor(private readonly bookingService: BookingService) {}
 
-  async cancelBooking(bookingRef: string, reason: string) {
+  async cancelBooking(bookingRef: string, reason: string, userId: string) {
     const aggregate = await this.bookingService.getBookingAggregateByRef(bookingRef);
+    this.bookingService.assertBookingOwnedByUser(aggregate.booking, userId);
     const oldStatus = this.bookingService.getDisplayStatus(aggregate.booking);
     const now = new Date().toISOString();
 
