@@ -15,8 +15,8 @@ export class BookingUpdateService {
       hostName?: string;
       hostPhoneNumber?: string;
       caddieArrangement?: 'none' | 'shared' | 'per_player';
-      buggyType?: 'none' | 'normal';
-      buggySharingPreference?: 'shared' | 'mixed' | 'solo';
+      buggyType?: 'jumbo' | 'normal';
+      buggySharingPreference?: 'shared' | 'mixed' | 'single';
       playerDetails?: Array<{
         name: string;
         phoneNumber: string;
