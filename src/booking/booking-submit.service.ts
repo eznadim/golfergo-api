@@ -11,6 +11,9 @@ export class BookingSubmitService {
 
   async submitBooking(input: {
     bookingRef: string;
+    caddieArrangement: 'none' | 'shared' | 'per_player';
+    buggyType: 'jumbo' | 'normal';
+    buggySharingPreference?: 'shared' | 'mixed' | 'single';
     playerDetails: Array<{
       name: string;
       phoneNumber: string;
@@ -23,7 +26,6 @@ export class BookingSubmitService {
       input.bookingRef,
     );
     const displayStatus = this.bookingService.getDisplayStatus(aggregate.booking);
-    const config = this.bookingService.extractBookingConfig(aggregate.lineItems);
 
     if (displayStatus === 'expired') {
       throw new GoneException('Booking hold has expired');
@@ -33,6 +35,31 @@ export class BookingSubmitService {
       throw new ConflictException('Booking is not in held status');
     }
 
+    const slotContext = await this.bookingService.getSlotContextById(
+      aggregate.booking.slot_id,
+    );
+    const availability = await this.bookingService.getSlotAvailability(
+      slotContext,
+      undefined,
+      aggregate.booking.booking_id,
+    );
+    const bookingConfig = this.bookingService.buildBookingConfigFromSubmit({
+      playType:
+        aggregate.booking.play_type === '9_holes' ? '9_holes' : '18_holes',
+      selectedNine: aggregate.booking.selected_nine,
+      caddieArrangement: input.caddieArrangement,
+      buggyType: input.buggyType,
+      buggySharingPreference: input.buggySharingPreference,
+      playerDetails: input.playerDetails,
+    });
+    const counts = this.bookingService.getRequestedBookingCounts(bookingConfig);
+    this.bookingService.ensureCapacityAvailable(counts, availability);
+    const pricing = this.bookingService.calculateBookingPricing(
+      availability,
+      bookingConfig,
+      counts,
+    );
+
     await this.bookingService.replaceBookingPlayers(
       aggregate.booking.booking_id,
       input.playerDetails.map((player) => ({
@@ -41,10 +68,33 @@ export class BookingSubmitService {
         category: player.category,
       })),
     );
+    await this.bookingService.replaceBookingLineItems(
+      aggregate.booking.booking_id,
+      slotContext,
+      availability,
+      counts,
+      bookingConfig,
+      pricing,
+    );
+
+    const hostPlayer = input.playerDetails.find((player) => player.isHost);
+    if (hostPlayer && aggregate.booking.user_id) {
+      await this.bookingService.updateAppUser(aggregate.booking.user_id, {
+        name: hostPlayer.name,
+        phone: hostPlayer.phoneNumber,
+        phone_normalized: this.phoneService.normalizePhoneNumber(hostPlayer.phoneNumber),
+      });
+    }
 
     const now = new Date().toISOString();
     await this.bookingService.updateBookingRow(aggregate.booking.booking_id, {
       status: 'confirmed',
+      total_amount: pricing.grandTotal,
+      buggy_type: bookingConfig.buggyType,
+      buggy_sharing_preference: bookingConfig.buggySharingPreference,
+      caddy_arrangement: bookingConfig.caddieArrangement,
+      payment_method: bookingConfig.paymentMethod,
+      estimated_total_amount: pricing.grandTotal,
       confirmed_at: now,
       hold_expires_at: null,
       updated_at: now,
@@ -68,17 +118,17 @@ export class BookingSubmitService {
         golfClubName: refreshed.facility?.facility_name ?? refreshed.organization.name,
         bookingDate: this.bookingService.extractDate(refreshed.slot.start_at),
         teeTimeSlot: this.bookingService.formatTeeTime(refreshed.slot.start_at),
-        playType: config.playType,
-        selectedNine: config.selectedNine,
-        playerCount: config.playerCount,
-        normalPlayerCount: config.normalPlayerCount,
-        seniorPlayerCount: config.seniorPlayerCount,
-        caddieArrangement: config.caddieArrangement,
-        buggyType: config.buggyType,
-        buggySharingPreference: config.buggySharingPreference,
-        grandTotal: this.bookingService.toNumber(refreshed.booking.total_amount),
+        playType: bookingConfig.playType,
+        selectedNine: bookingConfig.selectedNine,
+        playerCount: bookingConfig.playerCount,
+        normalPlayerCount: bookingConfig.normalPlayerCount,
+        seniorPlayerCount: bookingConfig.seniorPlayerCount,
+        caddieArrangement: bookingConfig.caddieArrangement,
+        buggyType: bookingConfig.buggyType,
+        buggySharingPreference: bookingConfig.buggySharingPreference,
+        grandTotal: pricing.grandTotal,
         currency: 'MYR',
-        paymentMethod: config.paymentMethod,
+        paymentMethod: bookingConfig.paymentMethod,
       },
     };
   }

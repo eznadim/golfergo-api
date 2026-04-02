@@ -28,17 +28,8 @@ const AvailableSlotsSchema = z.object({
 
 const CreateHoldSchema = z.object({
   slotId: z.string().min(1),
-  playType: z.enum(['9_holes', '18_holes']),
-  selectedNine: z.string().min(1).optional(),
   hostName: z.string().min(1),
   hostPhoneNumber: z.string().min(1),
-  playerCount: z.number().int().positive(),
-  normalPlayerCount: z.number().int().min(0),
-  seniorPlayerCount: z.number().int().min(0),
-  caddieArrangement: z.enum(['none', 'shared', 'per_player']),
-  buggyType: z.enum(['none', 'normal']),
-  buggySharingPreference: z.enum(['shared', 'mixed', 'solo']).optional(),
-  paymentMethod: z.enum(['pay_counter']),
   source: z.enum(['web', 'ios', 'android']),
 });
 
@@ -51,6 +42,9 @@ const PlayerDetailSchema = z.object({
 
 const SubmitBookingSchema = z.object({
   bookingRef: z.string().min(1),
+  caddieArrangement: z.enum(['none', 'shared', 'per_player']),
+  buggyType: z.enum(['jumbo', 'normal']),
+  buggySharingPreference: z.enum(['shared', 'mixed', 'single']).optional(),
   playerDetails: z.array(PlayerDetailSchema).min(1),
   acknowledgedTerms: z.literal(true),
 });
@@ -59,8 +53,8 @@ const UpdateBookingSchema = z.object({
   hostName: z.string().min(1).optional(),
   hostPhoneNumber: z.string().min(1).optional(),
   caddieArrangement: z.enum(['none', 'shared', 'per_player']).optional(),
-  buggyType: z.enum(['none', 'normal']).optional(),
-  buggySharingPreference: z.enum(['shared', 'mixed', 'solo']).optional(),
+  buggyType: z.enum(['jumbo', 'normal']).optional(),
+  buggySharingPreference: z.enum(['shared', 'mixed', 'single']).optional(),
   playerDetails: z.array(PlayerDetailSchema).min(1).optional(),
 });
 

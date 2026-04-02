@@ -15,24 +15,13 @@ export class BookingHoldService {
   async createBookingHold(
     input: {
       slotId: string;
-      playType: '9_holes' | '18_holes';
-      selectedNine?: string;
       hostName: string;
       hostPhoneNumber: string;
-      playerCount: number;
-      normalPlayerCount: number;
-      seniorPlayerCount: number;
-      caddieArrangement: 'none' | 'shared' | 'per_player';
-      buggyType: 'none' | 'normal';
-      buggySharingPreference?: 'shared' | 'mixed' | 'solo';
-      paymentMethod: 'pay_counter';
       source: 'web' | 'ios' | 'android';
     },
     idempotencyKey: string,
     deviceId?: string,
   ) {
-    this.bookingService.validateHoldRequest(input);
-
     const existing =
       await this.idempotencyService.getExistingBookingHold(idempotencyKey);
     if (existing?.booking_id) {
@@ -44,9 +33,7 @@ export class BookingHoldService {
 
     const slotContext = await this.bookingService.getSlotContextById(input.slotId);
     const availability = await this.bookingService.getSlotAvailability(slotContext);
-    const bookingConfig = this.bookingService.buildBookingConfig(input);
-    const counts = this.bookingService.getRequestedBookingCounts(bookingConfig);
-    this.bookingService.ensureCapacityAvailable(counts, availability);
+    this.bookingService.ensureSlotCanBeHeld(availability);
 
     const normalizedPhoneNumber = this.phoneService.normalizePhoneNumber(
       input.hostPhoneNumber,
@@ -61,11 +48,6 @@ export class BookingHoldService {
     const bookingId = randomUUID();
     const bookingRef = this.bookingService.generateBookingRef();
     const holdExpiresAt = new Date(Date.now() + 300 * 1000).toISOString();
-    const pricing = this.bookingService.calculateBookingPricing(
-      availability,
-      bookingConfig,
-      counts,
-    );
 
     await this.bookingService.insertBooking({
       booking_id: bookingId,
@@ -73,7 +55,7 @@ export class BookingHoldService {
       organization_id: slotContext.organization.organization_id,
       sport_id: slotContext.organizationSport.sport_id,
       status: 'held',
-      total_amount: pricing.grandTotal,
+      total_amount: null,
       created_at: now,
       booking_ref: bookingRef,
       visitor_id: visitorId,
@@ -85,16 +67,20 @@ export class BookingHoldService {
       cancellation_reason: null,
       updated_at: now,
       hold_expires_at: holdExpiresAt,
+      play_type: this.bookingService.getSlotPlayType(
+        slotContext.teeInstance,
+        slotContext.slot,
+      ),
+      selected_nine: this.bookingService.getSlotSelectedNine(
+        slotContext.teeInstance,
+        slotContext.slot,
+      ),
+      buggy_type: null,
+      buggy_sharing_preference: null,
+      caddy_arrangement: null,
+      payment_method: 'pay_counter',
+      estimated_total_amount: null,
     });
-
-    await this.bookingService.insertBookingLineItems(
-      bookingId,
-      slotContext,
-      availability,
-      counts,
-      bookingConfig,
-      pricing,
-    );
     await this.bookingService.insertBookingStatusHistory(bookingId, null, 'held');
     await this.idempotencyService.saveBookingHold(
       idempotencyKey,

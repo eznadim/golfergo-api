@@ -9,12 +9,12 @@ import { SupabaseService } from '../supabase/supabase.service';
 
 type SourcePlatform = 'web' | 'ios' | 'android';
 type BookingStatus = 'held' | 'confirmed' | 'completed' | 'cancelled' | 'expired';
-type ResourceType = 'tee_time' | 'caddie' | 'golf_cart';
+type ResourceType = 'tee_time' | 'caddie' | 'golf_cart' | 'buggy';
 type PlayType = '9_holes' | '18_holes';
 type PlayerCategory = 'normal' | 'senior';
 type CaddieArrangement = 'none' | 'shared' | 'per_player';
-type BuggyType = 'none' | 'normal';
-type BuggySharingPreference = 'shared' | 'mixed' | 'solo';
+type BuggyType = 'jumbo' | 'normal';
+type BuggySharingPreference = 'shared' | 'mixed' | 'single';
 type PaymentMethod = 'pay_counter';
 
 type PlayerDetail = {
@@ -24,23 +24,20 @@ type PlayerDetail = {
   isHost: boolean;
 };
 
-type SlotSelectionRequest = {
+type CreateHoldRequest = {
   slotId: string;
-  playType: PlayType;
-  selectedNine?: string;
-  playerCount: number;
-  normalPlayerCount: number;
-  seniorPlayerCount: number;
-  caddieArrangement: CaddieArrangement;
-  buggyType: BuggyType;
-  buggySharingPreference?: BuggySharingPreference;
-  paymentMethod: PaymentMethod;
-};
-
-type CreateHoldRequest = SlotSelectionRequest & {
   hostName: string;
   hostPhoneNumber: string;
   source: SourcePlatform;
+};
+
+type SubmitBookingRequest = {
+  playType: PlayType;
+  selectedNine: string | null;
+  caddieArrangement: CaddieArrangement;
+  buggyType: BuggyType;
+  buggySharingPreference?: BuggySharingPreference;
+  playerDetails: PlayerDetail[];
 };
 
 type UpdateBookingRequest = {
@@ -121,6 +118,9 @@ type ResourceInstanceRow = {
   resource_id: string;
   organization_id: string;
   identifier: string | null;
+  status: string | null;
+  play_type: string | null;
+  nine_type: string | null;
 };
 
 type ResourceSlotRow = {
@@ -165,6 +165,13 @@ type BookingRow = {
   cancellation_reason: string | null;
   updated_at: string | null;
   hold_expires_at: string | null;
+  play_type: string | null;
+  selected_nine: string | null;
+  buggy_type: string | null;
+  buggy_sharing_preference: string | null;
+  caddy_arrangement: string | null;
+  payment_method: string | null;
+  estimated_total_amount: number | string | null;
 };
 
 type BookingLineItemRow = {
@@ -289,7 +296,12 @@ export class BookingService {
   }) {
     this.assertSelectedNine(playType, selectedNine);
     const clubContext = await this.getClubContextBySlug(golfClubSlug);
-    const teeSlots = await this.getTeeSlots(clubContext, bookingDate);
+    const teeSlots = await this.getTeeSlots(
+      clubContext,
+      bookingDate,
+      playType,
+      selectedNine,
+    );
 
     const slots = await Promise.all(
       teeSlots.map(async (slot) => {
@@ -342,8 +354,19 @@ export class BookingService {
 
   async fetchBookingDetails(bookingRef: string) {
     const aggregate = await this.getBookingAggregateByRef(bookingRef);
-    const config = this.extractBookingConfig(aggregate.lineItems);
-    const pricing = this.calculatePricingFromLineItems(aggregate.lineItems, aggregate.resourceCatalog);
+    const config = this.getReadableBookingConfig(aggregate.booking, aggregate.lineItems);
+    const pricing =
+      aggregate.lineItems.length > 0
+        ? this.calculatePricingFromLineItems(aggregate.lineItems, aggregate.resourceCatalog)
+        : {
+            greenFeeTotal: 0,
+            buggyEstimatedTotal: 0,
+            insuranceTotal: 0,
+            sstTotal: 0,
+            grandTotal: 0,
+            currency: CURRENCY,
+            pendingCounterConfirmation: [],
+          };
 
     return {
       bookingRef: aggregate.booking.booking_ref,
@@ -568,7 +591,7 @@ export class BookingService {
       .from('bookable_resource')
       .select('resource_id, sport_id, resource_type, name, is_optional')
       .eq('sport_id', sportId)
-      .in('resource_type', ['tee_time', 'caddie', 'golf_cart']);
+      .in('resource_type', ['tee_time', 'caddie', 'golf_cart', 'buggy']);
 
     if (result.error) {
       this.throwSupabaseError(result.error.message);
@@ -580,7 +603,10 @@ export class BookingService {
       byType: {
         tee_time: rows.filter((row) => row.resource_type === 'tee_time'),
         caddie: rows.filter((row) => row.resource_type === 'caddie'),
-        golf_cart: rows.filter((row) => row.resource_type === 'golf_cart'),
+        buggy: rows.filter((row) => row.resource_type === 'buggy'),
+        golf_cart: rows.filter(
+          (row) => row.resource_type === 'golf_cart' || row.resource_type === 'buggy',
+        ),
       },
     };
   }
@@ -595,8 +621,11 @@ export class BookingService {
 
     const result = await this.supabase.client
       .from('resource_instance')
-      .select('resource_instance_id, resource_id, organization_id, identifier')
+      .select(
+        'resource_instance_id, resource_id, organization_id, identifier, status, play_type, nine_type',
+      )
       .eq('organization_id', organizationId)
+      .eq('status', 'active')
       .in('resource_id', resourceIds);
 
     if (result.error) {
@@ -606,8 +635,34 @@ export class BookingService {
     return (result.data ?? []) as ResourceInstanceRow[];
   }
 
-  private async getTeeSlots(clubContext: ClubContext, bookingDate?: string) {
-    const teeInstanceIds = [...clubContext.teeInstancesById.keys()];
+  private async getTeeSlots(
+    clubContext: ClubContext,
+    bookingDate?: string,
+    playType?: PlayType,
+    selectedNine?: string,
+  ) {
+    const teeInstanceIds = [...clubContext.teeInstancesById.values()]
+      .filter((instance) => {
+        if (!playType) {
+          return true;
+        }
+
+        const instancePlayType = this.getInstancePlayType(instance);
+        if (instancePlayType && instancePlayType !== playType) {
+          return false;
+        }
+
+        if (playType === '9_holes' && selectedNine) {
+          const instanceNine = this.getInstanceSelectedNine(instance);
+          if (instanceNine && instanceNine !== selectedNine) {
+            return false;
+          }
+        }
+
+        return true;
+      })
+      .map((instance) => instance.resource_instance_id);
+
     if (teeInstanceIds.length === 0) {
       return [];
     }
@@ -687,7 +742,9 @@ export class BookingService {
 
     const teeInstanceResult = await this.supabase.client
       .from('resource_instance')
-      .select('resource_instance_id, resource_id, organization_id, identifier')
+      .select(
+        'resource_instance_id, resource_id, organization_id, identifier, status, play_type, nine_type',
+      )
       .eq('resource_instance_id', slot.resource_instance_id)
       .maybeSingle<ResourceInstanceRow>();
 
@@ -769,6 +826,7 @@ export class BookingService {
   async getSlotAvailability(
     slotContext: SlotContext,
     bookingDate = this.extractDate(slotContext.slot.start_at),
+    excludedBookingId?: string,
   ): Promise<SlotAvailabilitySummary> {
     const { dayStartIso, dayEndIso } = this.getDayRange(bookingDate);
     const overrides = await this.getAvailabilityOverrides(
@@ -795,7 +853,10 @@ export class BookingService {
       slotContext.slot.start_at,
       slotContext.slot.end_at,
     );
-    const activeBookings = await this.getActiveBookingsForSlotIds([slotContext.slot.slot_id]);
+    const activeBookings = await this.getActiveBookingsForSlotIds(
+      [slotContext.slot.slot_id],
+      excludedBookingId,
+    );
     const lineItems = await this.getBookingLineItemsByBookingIds(
       activeBookings.map((item) => item.booking_id),
     );
@@ -808,11 +869,23 @@ export class BookingService {
       ),
       caddieCapacity: Math.max(
         0,
-        this.countUsableCapacity(supportSlots.caddie, overrides) - counts.caddieCount,
+        this.getSupportResourceCapacity(
+          supportInstances,
+          supportSlots.caddie,
+          overrides,
+          slotContext.resourceCatalog,
+          'caddie',
+        ) - counts.caddieCount,
       ),
       golfCartCapacity: Math.max(
         0,
-        this.countUsableCapacity(supportSlots.golf_cart, overrides) - counts.golfCartCount,
+        this.getSupportResourceCapacity(
+          supportInstances,
+          supportSlots.golf_cart,
+          overrides,
+          slotContext.resourceCatalog,
+          'golf_cart',
+        ) - counts.golfCartCount,
       ),
       teeTimeUnitPrice: this.toNumber(slotContext.slot.base_price),
       caddieUnitPrice: this.pickUnitPrice(
@@ -869,7 +942,10 @@ export class BookingService {
 
         if (resource.resource_type === 'caddie') {
           accumulator.caddie.push({ slot, instance });
-        } else if (resource.resource_type === 'golf_cart') {
+        } else if (
+          resource.resource_type === 'golf_cart' ||
+          resource.resource_type === 'buggy'
+        ) {
           accumulator.golf_cart.push({ slot, instance });
         }
 
@@ -882,7 +958,37 @@ export class BookingService {
     );
   }
 
-  private async getActiveBookingsForSlotIds(slotIds: string[]) {
+  private getSupportResourceCapacity(
+    instances: ResourceInstanceRow[],
+    resourceSlots: Array<{ slot: ResourceSlotRow; instance: ResourceInstanceRow }>,
+    overrides: AvailabilityOverrideRow[],
+    resourceCatalog: ResourceCatalog,
+    resourceType: 'caddie' | 'golf_cart',
+  ) {
+    if (resourceSlots.length > 0) {
+      return this.countUsableCapacity(resourceSlots, overrides);
+    }
+
+    return instances.filter((instance) => {
+      const resource = resourceCatalog.byId.get(instance.resource_id);
+      if (!resource) {
+        return false;
+      }
+
+      if (resourceType === 'caddie') {
+        return resource.resource_type === 'caddie';
+      }
+
+      return (
+        resource.resource_type === 'golf_cart' || resource.resource_type === 'buggy'
+      );
+    }).length;
+  }
+
+  private async getActiveBookingsForSlotIds(
+    slotIds: string[],
+    excludedBookingId?: string,
+  ) {
     if (slotIds.length === 0) {
       return [];
     }
@@ -890,7 +996,7 @@ export class BookingService {
     const result = await this.supabase.client
       .from('booking')
       .select(
-        'booking_id, user_id, organization_id, sport_id, status, total_amount, created_at, booking_ref, visitor_id, slot_id, is_phone_verified, booking_source, confirmed_at, cancelled_at, cancellation_reason, updated_at, hold_expires_at',
+        'booking_id, user_id, organization_id, sport_id, status, total_amount, created_at, booking_ref, visitor_id, slot_id, is_phone_verified, booking_source, confirmed_at, cancelled_at, cancellation_reason, updated_at, hold_expires_at, play_type, selected_nine, buggy_type, buggy_sharing_preference, caddy_arrangement, payment_method, estimated_total_amount',
       )
       .in('slot_id', slotIds)
       .in('status', ['held', 'confirmed']);
@@ -899,7 +1005,9 @@ export class BookingService {
       this.throwSupabaseError(result.error.message);
     }
 
-    return ((result.data ?? []) as BookingRow[]).filter(
+    return ((result.data ?? []) as BookingRow[])
+      .filter((booking) => booking.booking_id !== excludedBookingId)
+      .filter(
       (booking) =>
         booking.status === 'confirmed' ||
         (booking.status === 'held' && !this.isHoldExpired(booking)),
@@ -942,7 +1050,10 @@ export class BookingService {
           totals.playerCount += quantity;
         } else if (resource.resource_type === 'caddie') {
           totals.caddieCount += quantity;
-        } else if (resource.resource_type === 'golf_cart') {
+        } else if (
+          resource.resource_type === 'golf_cart' ||
+          resource.resource_type === 'buggy'
+        ) {
           totals.golfCartCount += quantity;
         }
 
@@ -964,6 +1075,12 @@ export class BookingService {
     }
     if (request.golfCartCount > availability.golfCartCapacity) {
       throw new ConflictException('Selected slot has insufficient golf cart capacity');
+    }
+  }
+
+  ensureSlotCanBeHeld(availability: SlotAvailabilitySummary) {
+    if (availability.playerCapacity <= 0) {
+      throw new ConflictException('Selected slot is fully booked');
     }
   }
 
@@ -1093,6 +1210,33 @@ export class BookingService {
     }
   }
 
+  async replaceBookingLineItems(
+    bookingId: string,
+    slotContext: SlotContext,
+    availability: SlotAvailabilitySummary,
+    counts: BookingCounts,
+    bookingConfig: BookingConfig,
+    pricing: BookingPricing,
+  ) {
+    const deleted = await this.supabase.client
+      .from('booking_line_item')
+      .delete()
+      .eq('booking_id', bookingId);
+
+    if (deleted.error) {
+      this.throwSupabaseError(deleted.error.message);
+    }
+
+    await this.insertBookingLineItems(
+      bookingId,
+      slotContext,
+      availability,
+      counts,
+      bookingConfig,
+      pricing,
+    );
+  }
+
   async insertBookingStatusHistory(
     bookingId: string,
     oldStatus: string | null,
@@ -1116,7 +1260,7 @@ export class BookingService {
     const result = await this.supabase.client
       .from('booking')
       .select(
-        'booking_id, user_id, organization_id, sport_id, status, total_amount, created_at, booking_ref, visitor_id, slot_id, is_phone_verified, booking_source, confirmed_at, cancelled_at, cancellation_reason, updated_at, hold_expires_at',
+        'booking_id, user_id, organization_id, sport_id, status, total_amount, created_at, booking_ref, visitor_id, slot_id, is_phone_verified, booking_source, confirmed_at, cancelled_at, cancellation_reason, updated_at, hold_expires_at, play_type, selected_nine, buggy_type, buggy_sharing_preference, caddy_arrangement, payment_method, estimated_total_amount',
       )
       .eq('booking_ref', bookingRef)
       .maybeSingle<BookingRow>();
@@ -1136,7 +1280,7 @@ export class BookingService {
     const result = await this.supabase.client
       .from('booking')
       .select(
-        'booking_id, user_id, organization_id, sport_id, status, total_amount, created_at, booking_ref, visitor_id, slot_id, is_phone_verified, booking_source, confirmed_at, cancelled_at, cancellation_reason, updated_at, hold_expires_at',
+        'booking_id, user_id, organization_id, sport_id, status, total_amount, created_at, booking_ref, visitor_id, slot_id, is_phone_verified, booking_source, confirmed_at, cancelled_at, cancellation_reason, updated_at, hold_expires_at, play_type, selected_nine, buggy_type, buggy_sharing_preference, caddy_arrangement, payment_method, estimated_total_amount',
       )
       .eq('booking_id', bookingId)
       .maybeSingle<BookingRow>();
@@ -1292,7 +1436,7 @@ export class BookingService {
     const result = await this.supabase.client
       .from('booking')
       .select(
-        'booking_id, user_id, organization_id, sport_id, status, total_amount, created_at, booking_ref, visitor_id, slot_id, is_phone_verified, booking_source, confirmed_at, cancelled_at, cancellation_reason, updated_at, hold_expires_at',
+        'booking_id, user_id, organization_id, sport_id, status, total_amount, created_at, booking_ref, visitor_id, slot_id, is_phone_verified, booking_source, confirmed_at, cancelled_at, cancellation_reason, updated_at, hold_expires_at, play_type, selected_nine, buggy_type, buggy_sharing_preference, caddy_arrangement, payment_method, estimated_total_amount',
       )
       .order('created_at', { ascending: false });
 
@@ -1304,12 +1448,6 @@ export class BookingService {
   }
 
   buildHoldResponse(aggregate: BookingAggregate) {
-    const config = this.extractBookingConfig(aggregate.lineItems);
-    const pricing = this.calculatePricingFromLineItems(
-      aggregate.lineItems,
-      aggregate.resourceCatalog,
-    );
-
     return {
       bookingId: aggregate.booking.booking_id,
       bookingRef: aggregate.booking.booking_ref,
@@ -1328,17 +1466,39 @@ export class BookingService {
         golfClubSlug: aggregate.organization.slug,
         bookingDate: this.extractDate(aggregate.slot.start_at),
         teeTimeSlot: this.formatTeeTime(aggregate.slot.start_at),
-        playType: config.playType,
-        selectedNine: config.selectedNine,
-        playerCount: config.playerCount,
-        normalPlayerCount: config.normalPlayerCount,
-        seniorPlayerCount: config.seniorPlayerCount,
-        caddieArrangement: config.caddieArrangement,
-        buggyType: config.buggyType,
-        buggySharingPreference: config.buggySharingPreference,
-        pricing,
-        paymentMethod: config.paymentMethod,
+        playType:
+          aggregate.booking.play_type === '9_holes' ? '9_holes' : '18_holes',
+        selectedNine: aggregate.booking.selected_nine,
       },
+    };
+  }
+
+  getReadableBookingConfig(
+    booking: BookingRow,
+    lineItems: BookingLineItemRow[],
+  ): BookingConfig {
+    if (lineItems.length > 0) {
+      return this.extractBookingConfig(lineItems);
+    }
+
+    return {
+      playType: booking.play_type === '9_holes' ? '9_holes' : '18_holes',
+      selectedNine: booking.selected_nine,
+      playerCount: 0,
+      normalPlayerCount: 0,
+      seniorPlayerCount: 0,
+      caddieArrangement:
+        booking.caddy_arrangement === 'shared' || booking.caddy_arrangement === 'per_player'
+          ? booking.caddy_arrangement
+          : 'none',
+      buggyType: booking.buggy_type === 'jumbo' ? 'jumbo' : 'normal',
+      buggySharingPreference:
+        booking.buggy_sharing_preference === 'shared' ||
+        booking.buggy_sharing_preference === 'mixed' ||
+        booking.buggy_sharing_preference === 'single'
+          ? booking.buggy_sharing_preference
+          : null,
+      paymentMethod: 'pay_counter',
     };
   }
 
@@ -1388,14 +1548,101 @@ export class BookingService {
     };
   }
 
-  validateHoldRequest(request: CreateHoldRequest) {
-    this.assertSelectedNine(request.playType, request.selectedNine);
-    if (request.playerCount !== request.normalPlayerCount + request.seniorPlayerCount) {
-      throw new ConflictException('Player category totals must match playerCount');
+  getSlotPlayType(
+    teeInstance: ResourceInstanceRow,
+    slot: ResourceSlotRow,
+  ): PlayType {
+    if (teeInstance.play_type === '9_holes' || teeInstance.play_type === '18_holes') {
+      return teeInstance.play_type;
     }
-    if (request.buggyType === 'none' && request.buggySharingPreference) {
-      throw new ConflictException('Buggy sharing preference is not applicable when buggyType is none');
+
+    const inferredPlayType = this.getInstancePlayType(teeInstance);
+    if (inferredPlayType) {
+      return inferredPlayType;
     }
+
+    if (teeInstance.nine_type) {
+      return '9_holes';
+    }
+
+    const slotStart = new Date(slot.start_at);
+    const malaysiaTime = new Intl.DateTimeFormat('en-GB', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+      timeZone: 'Asia/Kuala_Lumpur',
+    }).format(slotStart);
+    const [hour, minute] = malaysiaTime.split(':').map(Number);
+    const minutesSinceMidnight = hour * 60 + minute;
+
+    // Morning slots are treated as 18 holes; all later slots are 9 holes.
+    if (minutesSinceMidnight >= 7 * 60 && minutesSinceMidnight <= 9 * 60 + 15) {
+      return '18_holes';
+    }
+
+    return '9_holes';
+  }
+
+  getSlotSelectedNine(
+    teeInstance: ResourceInstanceRow,
+    slot: ResourceSlotRow,
+  ): string | null {
+    const playType = this.getSlotPlayType(teeInstance, slot);
+    if (playType === '18_holes') {
+      return null;
+    }
+
+    const inferredNine = this.getInstanceSelectedNine(teeInstance);
+    if (inferredNine) {
+      return inferredNine;
+    }
+
+    if (!teeInstance.nine_type) {
+      throw new ConflictException('9-hole slot is missing selected nine configuration');
+    }
+
+    return teeInstance.nine_type;
+  }
+
+  private getInstancePlayType(teeInstance: ResourceInstanceRow): PlayType | null {
+    if (teeInstance.play_type === '9_holes' || teeInstance.play_type === '18_holes') {
+      return teeInstance.play_type;
+    }
+
+    const identifier = teeInstance.identifier?.toLowerCase() ?? '';
+    if (!identifier) {
+      return null;
+    }
+
+    if (identifier.includes('_18_') || identifier.includes('18_main')) {
+      return '18_holes';
+    }
+
+    if (
+      identifier.includes('_9_') ||
+      identifier.includes('9_damai') ||
+      identifier.includes('9_sutera')
+    ) {
+      return '9_holes';
+    }
+
+    return null;
+  }
+
+  private getInstanceSelectedNine(teeInstance: ResourceInstanceRow): string | null {
+    if (teeInstance.nine_type) {
+      return teeInstance.nine_type;
+    }
+
+    const identifier = teeInstance.identifier?.toLowerCase() ?? '';
+    if (identifier.includes('damai')) {
+      return 'damai';
+    }
+    if (identifier.includes('sutera')) {
+      return 'sutera';
+    }
+
+    return null;
   }
 
   private assertSelectedNine(playType: PlayType, selectedNine?: string | null) {
@@ -1404,18 +1651,42 @@ export class BookingService {
     }
   }
 
-  buildBookingConfig(request: SlotSelectionRequest): BookingConfig {
+  buildBookingConfigFromSubmit(request: SubmitBookingRequest): BookingConfig {
+    this.assertSelectedNine(request.playType, request.selectedNine);
+
+    const playerCount = request.playerDetails.length;
+    const normalPlayerCount = request.playerDetails.filter(
+      (player) => player.category === 'normal',
+    ).length;
+    const seniorPlayerCount = request.playerDetails.filter(
+      (player) => player.category === 'senior',
+    ).length;
+
+    if (playerCount !== normalPlayerCount + seniorPlayerCount) {
+      throw new ConflictException('Player category totals must match playerDetails');
+    }
+
+    if (request.playerDetails.filter((player) => player.isHost).length !== 1) {
+      throw new ConflictException('Exactly one player must be marked as the host');
+    }
+
+    if (request.buggyType === 'normal' && !request.buggySharingPreference) {
+      throw new ConflictException(
+        'Buggy sharing preference is required when buggyType is normal',
+      );
+    }
+
     return {
       playType: request.playType,
-      selectedNine: request.playType === '9_holes' ? request.selectedNine ?? null : null,
-      playerCount: request.playerCount,
-      normalPlayerCount: request.normalPlayerCount,
-      seniorPlayerCount: request.seniorPlayerCount,
+      selectedNine: request.selectedNine,
+      playerCount,
+      normalPlayerCount,
+      seniorPlayerCount,
       caddieArrangement: request.caddieArrangement,
       buggyType: request.buggyType,
       buggySharingPreference:
-        request.buggyType === 'none' ? null : request.buggySharingPreference ?? 'shared',
-      paymentMethod: request.paymentMethod,
+        request.buggyType === 'jumbo' ? null : request.buggySharingPreference ?? 'shared',
+      paymentMethod: 'pay_counter',
     };
   }
 
@@ -1429,9 +1700,9 @@ export class BookingService {
             ? 1
             : 0,
       golfCartCount:
-        config.buggyType === 'none'
-          ? 0
-          : config.buggySharingPreference === 'solo'
+        config.buggyType === 'jumbo'
+          ? Math.ceil(config.playerCount / 6)
+          : config.buggySharingPreference === 'single'
             ? config.playerCount
             : Math.ceil(config.playerCount / 2),
     };
@@ -1480,8 +1751,8 @@ export class BookingService {
       normalPlayerCount: metadata?.normalPlayerCount ?? playerCount,
       seniorPlayerCount: metadata?.seniorPlayerCount ?? 0,
       caddieArrangement: metadata?.caddieArrangement ?? 'none',
-      buggyType: metadata?.buggyType ?? 'none',
-      buggySharingPreference: metadata?.buggySharingPreference ?? null,
+      buggyType: metadata?.buggyType ?? 'normal',
+      buggySharingPreference: metadata?.buggySharingPreference ?? 'shared',
       paymentMethod: metadata?.paymentMethod ?? 'pay_counter',
     };
   }
@@ -1504,7 +1775,7 @@ export class BookingService {
       caddieArrangement: updates.caddieArrangement ?? currentConfig.caddieArrangement,
       buggyType: updates.buggyType ?? currentConfig.buggyType,
       buggySharingPreference:
-        updates.buggyType === 'none'
+        updates.buggyType === 'jumbo'
           ? null
           : updates.buggySharingPreference ?? currentConfig.buggySharingPreference,
     };

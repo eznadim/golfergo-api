@@ -39,7 +39,10 @@ export class BookingListService {
           new Date(right.slot.start_at).getTime(),
       )
       .map((aggregate) => {
-        const config = this.bookingService.extractBookingConfig(aggregate.lineItems);
+        const config = this.bookingService.getReadableBookingConfig(
+          aggregate.booking,
+          aggregate.lineItems,
+        );
 
         return {
           bookingRef: aggregate.booking.booking_ref,
