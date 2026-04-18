@@ -226,9 +226,11 @@ type SlotAvailabilitySummary = {
   playerCapacity: number;
   caddieCapacity: number;
   golfCartCapacity: number;
+  publishedRateUnitPrice: number;
   teeTimeUnitPrice: number;
   caddieUnitPrice: number;
   golfCartUnitPrice: number;
+  activeBookingCount: number;
 };
 
 type BookingAggregate = {
@@ -259,6 +261,9 @@ type GolfClubListItem = {
 
 const HOLD_DURATION_SECONDS = 300;
 const CURRENCY = 'MYR';
+const BUGGY_FEE_PER_PLAYER = 40;
+const INSURANCE_FEE_PER_PLAYER = 5;
+const SST_RATE = 0.08;
 
 @Injectable()
 export class BookingService {
@@ -452,14 +457,18 @@ export class BookingService {
           resourceCatalog: clubContext.resourceCatalog,
         });
 
+        if (availability.activeBookingCount > 0) {
+          return null;
+        }
+
         return {
           slotId: slot.slot_id,
           teeTimeSlot: this.formatTeeTime(slot.start_at),
           startAt: slot.start_at,
           endAt: slot.end_at,
           currency: CURRENCY,
-          fromPrice: availability.teeTimeUnitPrice,
-          pricingLabel: `From ${CURRENCY} ${availability.teeTimeUnitPrice} nett`,
+          fromPrice: availability.publishedRateUnitPrice,
+          pricingLabel: `From ${CURRENCY} ${availability.publishedRateUnitPrice}`,
           remainingPlayerCapacity: availability.playerCapacity,
           buggyPolicy: 'required',
           isAvailable: availability.playerCapacity > 0,
@@ -1037,13 +1046,13 @@ export class BookingService {
           'golf_cart',
         ) - counts.golfCartCount,
       ),
-      teeTimeUnitPrice: this.toNumber(slotContext.slot.base_price),
-      caddieUnitPrice: this.pickUnitPrice(
-        supportSlots.caddie.map((item) => item.slot.base_price),
+      publishedRateUnitPrice: this.toNumber(slotContext.slot.base_price),
+      teeTimeUnitPrice: this.calculateGreenFeeUnitPrice(
+        this.toNumber(slotContext.slot.base_price),
       ),
-      golfCartUnitPrice: this.pickUnitPrice(
-        supportSlots.golf_cart.map((item) => item.slot.base_price),
-      ),
+      caddieUnitPrice: 0,
+      golfCartUnitPrice: BUGGY_FEE_PER_PLAYER,
+      activeBookingCount: activeBookings.length,
     };
   }
 
@@ -1143,7 +1152,7 @@ export class BookingService {
           resourceCatalog: clubContext.resourceCatalog,
         });
 
-        if (availability.playerCapacity <= 0) {
+        if (availability.activeBookingCount > 0 || availability.playerCapacity <= 0) {
           continue;
         }
 
@@ -1156,7 +1165,7 @@ export class BookingService {
           playType: this.getSlotPlayType(teeInstance, slot),
           selectedNine: this.getSlotSelectedNine(teeInstance, slot),
           remainingPlayerCapacity: availability.playerCapacity,
-          fromPrice: availability.teeTimeUnitPrice,
+          fromPrice: availability.publishedRateUnitPrice,
           currency: CURRENCY,
           buggyPolicy: 'required' as const,
           isAvailable: true,
@@ -1194,7 +1203,7 @@ export class BookingService {
     }).length;
   }
 
-  private async getActiveBookingsForSlotIds(
+  async getActiveBookingsForSlotIds(
     slotIds: string[],
     excludedBookingId?: string,
   ) {
@@ -1288,6 +1297,10 @@ export class BookingService {
   }
 
   ensureSlotCanBeHeld(availability: SlotAvailabilitySummary) {
+    if (availability.activeBookingCount > 0) {
+      throw new ConflictException('Selected slot is already booked');
+    }
+
     if (availability.playerCapacity <= 0) {
       throw new ConflictException('Selected slot is fully booked');
     }
@@ -1417,13 +1430,17 @@ export class BookingService {
         resource_instance_id: null,
         slot_id: slotContext.slot.slot_id,
         quantity: counts.caddieCount,
-        unit_price: availability.caddieUnitPrice,
-        total_price: availability.caddieUnitPrice * counts.caddieCount,
-        metadata: { resourceType: 'caddie' },
+        unit_price: 0,
+        total_price: 0,
+        metadata: { resourceType: 'caddie', pricingPendingAtCounter: true },
       });
     }
 
     if (counts.golfCartCount > 0 && slotContext.resourceCatalog.byType.golf_cart[0]) {
+      const golfCartUnitPrice =
+        counts.golfCartCount > 0
+          ? this.roundCurrency(pricing.buggyEstimatedTotal / counts.golfCartCount)
+          : 0;
       items.push({
         booking_line_item_id: randomUUID(),
         booking_id: bookingId,
@@ -1431,8 +1448,8 @@ export class BookingService {
         resource_instance_id: null,
         slot_id: slotContext.slot.slot_id,
         quantity: counts.golfCartCount,
-        unit_price: availability.golfCartUnitPrice,
-        total_price: availability.golfCartUnitPrice * counts.golfCartCount,
+        unit_price: golfCartUnitPrice,
+        total_price: pricing.buggyEstimatedTotal,
         metadata: { resourceType: 'golf_cart' },
       });
     }
@@ -1783,14 +1800,18 @@ export class BookingService {
     const insuranceTotal = this.calculateInsuranceTotal(
       this.extractBookingConfig(lineItems).playerCount,
     );
-    const sstTotal = this.calculateSstTotal(greenFeeTotal);
+    const sstTotal = this.calculateSstTotal(
+      greenFeeTotal + buggyEstimatedTotal + insuranceTotal,
+    );
 
     return {
       greenFeeTotal,
       buggyEstimatedTotal,
       insuranceTotal,
       sstTotal,
-      grandTotal: greenFeeTotal + buggyEstimatedTotal + insuranceTotal + sstTotal,
+      grandTotal: this.roundCurrency(
+        greenFeeTotal + buggyEstimatedTotal + insuranceTotal + sstTotal,
+      ),
       currency: CURRENCY,
       pendingCounterConfirmation:
         this.extractBookingConfig(lineItems).caddieArrangement === 'none' ? [] : ['caddie'],
@@ -1962,28 +1983,36 @@ export class BookingService {
     config: BookingConfig,
     counts: BookingCounts,
   ): BookingPricing {
-    const greenFeeTotal = availability.teeTimeUnitPrice * config.playerCount;
-    const buggyEstimatedTotal = availability.golfCartUnitPrice * counts.golfCartCount;
+    const greenFeeTotal = this.roundCurrency(
+      availability.teeTimeUnitPrice * config.playerCount,
+    );
+    const buggyEstimatedTotal = this.roundCurrency(
+      BUGGY_FEE_PER_PLAYER * config.playerCount,
+    );
     const insuranceTotal = this.calculateInsuranceTotal(config.playerCount);
-    const sstTotal = this.calculateSstTotal(greenFeeTotal);
+    const sstTotal = this.calculateSstTotal(
+      greenFeeTotal + buggyEstimatedTotal + insuranceTotal,
+    );
 
     return {
       greenFeeTotal,
       buggyEstimatedTotal,
       insuranceTotal,
       sstTotal,
-      grandTotal: greenFeeTotal + buggyEstimatedTotal + insuranceTotal + sstTotal,
+      grandTotal: this.roundCurrency(
+        greenFeeTotal + buggyEstimatedTotal + insuranceTotal + sstTotal,
+      ),
       currency: CURRENCY,
       pendingCounterConfirmation: config.caddieArrangement === 'none' ? [] : ['caddie'],
     };
   }
 
   private calculateInsuranceTotal(playerCount: number) {
-    return playerCount * 3;
+    return this.roundCurrency(playerCount * INSURANCE_FEE_PER_PLAYER);
   }
 
-  private calculateSstTotal(greenFeeTotal: number) {
-    return Math.round(greenFeeTotal * 0.06);
+  private calculateSstTotal(taxableSubtotal: number) {
+    return this.roundCurrency(taxableSubtotal * SST_RATE);
   }
 
   extractBookingConfig(lineItems: BookingLineItemRow[]): BookingConfig {
@@ -2175,7 +2204,18 @@ export class BookingService {
   }
 
   extractDate(isoDateTime: string) {
-    return new Date(isoDateTime).toISOString().slice(0, 10);
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Kuala_Lumpur',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(new Date(isoDateTime));
+
+    const year = parts.find((part) => part.type === 'year')?.value ?? '0000';
+    const month = parts.find((part) => part.type === 'month')?.value ?? '00';
+    const day = parts.find((part) => part.type === 'day')?.value ?? '00';
+
+    return `${year}-${month}-${day}`;
   }
 
   private isOverridden(slot: ResourceSlotRow, overrides: AvailabilityOverrideRow[]) {
@@ -2216,6 +2256,17 @@ export class BookingService {
     return (
       prices.map((value) => this.toNumber(value)).find((value) => value > 0) ?? 0
     );
+  }
+
+  private calculateGreenFeeUnitPrice(publishedRateUnitPrice: number) {
+    const preTaxSubtotal = publishedRateUnitPrice / (1 + SST_RATE);
+    return this.roundCurrency(
+      Math.max(0, preTaxSubtotal - BUGGY_FEE_PER_PLAYER - INSURANCE_FEE_PER_PLAYER),
+    );
+  }
+
+  private roundCurrency(value: number) {
+    return Math.round(value * 100) / 100;
   }
 
   toNumber(value: number | string | null | undefined) {
