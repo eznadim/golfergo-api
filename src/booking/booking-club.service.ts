@@ -5,7 +5,11 @@ import { BookingService } from './booking.service';
 export class BookingClubService {
   constructor(private readonly bookingService: BookingService) {}
 
-  fetchGolfClubList() {
+  fetchGolfClubs(golfClubSlug?: string) {
+    if (golfClubSlug) {
+      return this.bookingService.fetchGolfClubDetails(golfClubSlug);
+    }
+
     return this.bookingService.fetchGolfClubList();
   }
 }

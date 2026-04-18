@@ -18,6 +18,7 @@ import { BookingClubService } from './booking-club.service';
 import { BookingDetailsService } from './booking-details.service';
 import { BookingHoldService } from './booking-hold.service';
 import { BookingListService } from './booking-list.service';
+import { BookingQuickBookService } from './booking-quick-book.service';
 import { BookingSlotService } from './booking-slot.service';
 import { BookingSubmitService } from './booking-submit.service';
 import { BookingUpdateService } from './booking-update.service';
@@ -65,6 +66,14 @@ const CancelBookingSchema = z.object({
   reason: z.string().min(1),
 });
 
+const QuickBookSchema = z.object({
+  golfClubSlug: z.string().min(1).optional(),
+  latitude: z.number().finite().optional(),
+  longitude: z.number().finite().optional(),
+  maxResults: z.number().int().positive().max(10).optional(),
+  searchDays: z.number().int().positive().max(14).optional(),
+});
+
 function parsePositiveInteger(
   value: string | undefined,
   fallback: number,
@@ -89,19 +98,26 @@ export class BookingController {
     private readonly bookingSubmitService: BookingSubmitService,
     private readonly bookingDetailsService: BookingDetailsService,
     private readonly bookingListService: BookingListService,
+    private readonly bookingQuickBookService: BookingQuickBookService,
     private readonly bookingUpdateService: BookingUpdateService,
     private readonly bookingCancelService: BookingCancelService,
   ) {}
 
   @Get('golf-clubs')
-  getGolfClubs() {
-    return this.bookingClubService.fetchGolfClubList();
+  getGolfClubs(@Query('slug') golfClubSlug?: string) {
+    return this.bookingClubService.fetchGolfClubs(golfClubSlug);
   }
 
   @Post('available-slots')
   getAvailableSlots(@Body() body: unknown) {
     const data = AvailableSlotsSchema.parse(body);
     return this.bookingSlotService.fetchAvailableSlots(data);
+  }
+
+  @Post('quick-book')
+  getQuickBook(@Body() body: unknown) {
+    const data = QuickBookSchema.parse(body);
+    return this.bookingQuickBookService.fetchQuickBook(data);
   }
 
   @Post('hold')
