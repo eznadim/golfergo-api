@@ -89,6 +89,8 @@ type OrganizationRow = {
   name: string;
   address: string | null;
   slug: string;
+  latitude: number | string | null;
+  longitude: number | string | null;
   created_at: string | null;
 };
 
@@ -240,6 +242,21 @@ type BookingAggregate = {
   resourceCatalog: ResourceCatalog;
 };
 
+type GolfClubListItem = {
+  id: string;
+  slug: string;
+  name: string;
+  address: string;
+  latitude: number | null;
+  longitude: number | null;
+  noOfHoles: number;
+  supportsNineHoles: boolean;
+  supportedNines: string[];
+  buggyPolicy: 'required';
+  paymentMethods: Array<'pay_counter'>;
+  updatedAt: string;
+};
+
 const HOLD_DURATION_SECONDS = 300;
 const CURRENCY = 'MYR';
 
@@ -282,6 +299,115 @@ export class BookingService {
         };
       })
       .filter((item): item is NonNullable<typeof item> => item !== null);
+  }
+
+  async fetchGolfClubDetails(golfClubSlug: string) {
+    const clubContext = await this.getClubContextBySlug(golfClubSlug);
+    const club = this.buildGolfClubSummary(clubContext);
+    const nextAvailableSlot = await this.getNextAvailableSlotForClub(clubContext);
+
+    return {
+      club: {
+        ...club,
+        organizationId: clubContext.organization.organization_id,
+        organizationSportId: clubContext.organizationSport.organization_sport_id,
+        facilityId: clubContext.facility.facility_id,
+        facilityCapacity: this.toNumber(clubContext.facility.capacity),
+      },
+      bookingConfig: {
+        supportedPlayTypes: club.supportsNineHoles ? ['18_holes', '9_holes'] : ['18_holes'],
+        supportedNines: club.supportedNines,
+        buggyPolicy: club.buggyPolicy,
+        paymentMethods: club.paymentMethods,
+      },
+      todayQuickBookPreview: {
+        bookingDate: this.getTodayDateInMalaysia(),
+        nextSlot: nextAvailableSlot,
+      },
+    };
+  }
+
+  async fetchQuickBook({
+    golfClubSlug,
+    latitude,
+    longitude,
+    maxResults = 3,
+    searchDays = 2,
+  }: {
+    golfClubSlug?: string;
+    latitude?: number;
+    longitude?: number;
+    maxResults?: number;
+    searchDays?: number;
+  }) {
+    const clubs = golfClubSlug
+      ? [await this.getClubContextBySlug(golfClubSlug)]
+      : await this.getAllClubContexts();
+
+    const recommendations = (
+      await Promise.all(
+        clubs.map(async (clubContext) => {
+          const nextSlot = await this.getNextAvailableSlotForClub(
+            clubContext,
+            searchDays,
+          );
+          if (!nextSlot) {
+            return null;
+          }
+
+          const club = this.buildGolfClubSummary(clubContext);
+
+          return {
+            club,
+            distanceInKm: this.calculateDistanceInKm(
+              latitude,
+              longitude,
+              club.latitude,
+              club.longitude,
+            ),
+            nextSlot,
+          };
+        }),
+      )
+    )
+      .filter((item): item is NonNullable<typeof item> => item !== null)
+      .sort((left, right) => {
+        const leftDistance = left.distanceInKm ?? Number.POSITIVE_INFINITY;
+        const rightDistance = right.distanceInKm ?? Number.POSITIVE_INFINITY;
+
+        if (
+          latitude !== undefined &&
+          longitude !== undefined &&
+          leftDistance !== rightDistance
+        ) {
+          return leftDistance - rightDistance;
+        }
+
+        return new Date(left.nextSlot.startAt).getTime() - new Date(right.nextSlot.startAt).getTime();
+      })
+      .slice(0, maxResults);
+
+    return {
+      bookingDate: this.getDateInMalaysia(),
+      ranking: {
+        requestedCoordinates:
+          latitude !== undefined && longitude !== undefined ? { latitude, longitude } : null,
+        strategy:
+          latitude !== undefined && longitude !== undefined
+            ? 'nearest_club_then_next_time_slot'
+            : 'next_time_slot_across_days',
+        locationRankingApplied:
+          latitude !== undefined &&
+          longitude !== undefined &&
+          recommendations.some((item) => item.distanceInKm !== null),
+      },
+      searchWindow: {
+        startDate: this.getDateInMalaysia(),
+        searchDays,
+      },
+      recommendation: recommendations[0] ?? null,
+      alternatives: recommendations.slice(1),
+    };
   }
 
   async fetchAvailableSlots({
@@ -456,7 +582,7 @@ export class BookingService {
 
     const result = await this.supabase.client
       .from('organization')
-      .select('organization_id, name, address, slug, created_at')
+      .select('organization_id, name, address, slug, latitude, longitude, created_at')
       .in('organization_id', organizationIds);
 
     if (result.error) {
@@ -521,11 +647,17 @@ export class BookingService {
     return facility.data;
   }
 
+  private async getAllClubContexts() {
+    const golfClubs = await this.fetchGolfClubList();
+
+    return Promise.all(golfClubs.map((club) => this.getClubContextBySlug(club.slug)));
+  }
+
   private async getClubContextBySlug(golfClubSlug: string): Promise<ClubContext> {
     const sport = await this.getGolfSport();
     const organizationResult = await this.supabase.client
       .from('organization')
-      .select('organization_id, name, address, slug, created_at')
+      .select('organization_id, name, address, slug, latitude, longitude, created_at')
       .eq('slug', golfClubSlug)
       .maybeSingle<OrganizationRow>();
 
@@ -609,6 +741,23 @@ export class BookingService {
           (row) => row.resource_type === 'golf_cart' || row.resource_type === 'buggy',
         ),
       },
+    };
+  }
+
+  private buildGolfClubSummary(clubContext: ClubContext): GolfClubListItem {
+    return {
+      id: clubContext.facility.facility_id,
+      slug: clubContext.organization.slug,
+      name: clubContext.facility.facility_name || clubContext.organization.name,
+      address: clubContext.organization.address ?? '',
+      latitude: this.toNullableNumber(clubContext.organization.latitude),
+      longitude: this.toNullableNumber(clubContext.organization.longitude),
+      noOfHoles: this.toNumber(clubContext.facility.no_of_holes),
+      supportsNineHoles: this.toNumber(clubContext.facility.no_of_holes) >= 18,
+      supportedNines: this.getSupportedNines(clubContext.organization.slug),
+      buggyPolicy: 'required',
+      paymentMethods: ['pay_counter'],
+      updatedAt: clubContext.organization.created_at ?? new Date().toISOString(),
     };
   }
 
@@ -768,7 +917,7 @@ export class BookingService {
 
     const organizationResult = await this.supabase.client
       .from('organization')
-      .select('organization_id, name, address, slug, created_at')
+      .select('organization_id, name, address, slug, latitude, longitude, created_at')
       .eq('organization_id', teeInstance.organization_id)
       .maybeSingle<OrganizationRow>();
 
@@ -957,6 +1106,65 @@ export class BookingService {
         golf_cart: [] as Array<{ slot: ResourceSlotRow; instance: ResourceInstanceRow }>,
       },
     );
+  }
+
+  private async getNextAvailableSlotForClub(
+    clubContext: ClubContext,
+    searchDays = 2,
+  ) {
+    const now = Date.now();
+
+    for (let offset = 0; offset < searchDays; offset += 1) {
+      const bookingDate = this.getDateInMalaysia(offset);
+      const teeSlots = await this.getTeeSlots(clubContext, bookingDate);
+
+      for (const slot of teeSlots) {
+        if (new Date(slot.start_at).getTime() <= now) {
+          continue;
+        }
+
+        const teeInstance = clubContext.teeInstancesById.get(slot.resource_instance_id);
+        if (!teeInstance) {
+          continue;
+        }
+
+        const teeResource = clubContext.resourceCatalog.byId.get(teeInstance.resource_id);
+        if (!teeResource) {
+          continue;
+        }
+
+        const availability = await this.getSlotAvailability({
+          organization: clubContext.organization,
+          organizationSport: clubContext.organizationSport,
+          facility: clubContext.facility,
+          slot,
+          teeResource,
+          teeInstance,
+          resourceCatalog: clubContext.resourceCatalog,
+        });
+
+        if (availability.playerCapacity <= 0) {
+          continue;
+        }
+
+        return {
+          bookingDate,
+          slotId: slot.slot_id,
+          teeTimeSlot: this.formatTeeTime(slot.start_at),
+          startAt: slot.start_at,
+          endAt: slot.end_at,
+          playType: this.getSlotPlayType(teeInstance, slot),
+          selectedNine: this.getSlotSelectedNine(teeInstance, slot),
+          remainingPlayerCapacity: availability.playerCapacity,
+          fromPrice: availability.teeTimeUnitPrice,
+          currency: CURRENCY,
+          buggyPolicy: 'required' as const,
+          isAvailable: true,
+        };
+      }
+    }
+
+    return null;
   }
 
   private getSupportResourceCapacity(
@@ -1324,7 +1532,7 @@ export class BookingService {
   async buildBookingAggregate(booking: BookingRow): Promise<BookingAggregate> {
     const organizationPromise = this.supabase.client
       .from('organization')
-      .select('organization_id, name, address, slug, created_at')
+      .select('organization_id, name, address, slug, latitude, longitude, created_at')
       .eq('organization_id', booking.organization_id)
       .maybeSingle<OrganizationRow>();
 
@@ -1892,6 +2100,69 @@ export class BookingService {
     }).format(new Date());
 
     return this.getDayRange(todayInMalaysia);
+  }
+
+  private getTodayDateInMalaysia() {
+    return this.getDateInMalaysia();
+  }
+
+  private getDateInMalaysia(offsetDays = 0) {
+    const now = new Date();
+    const malaysiaNow = new Date(
+      now.toLocaleString('en-US', { timeZone: 'Asia/Kuala_Lumpur' }),
+    );
+    malaysiaNow.setDate(malaysiaNow.getDate() + offsetDays);
+
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Kuala_Lumpur',
+    }).format(malaysiaNow);
+  }
+
+  private toNullableNumber(value: number | string | null | undefined) {
+    if (value === null || value === undefined || value === '') {
+      return null;
+    }
+
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  private calculateDistanceInKm(
+    userLatitude?: number,
+    userLongitude?: number,
+    clubLatitude?: number | null,
+    clubLongitude?: number | null,
+  ) {
+    if (
+      userLatitude === undefined ||
+      userLongitude === undefined ||
+      clubLatitude === null ||
+      clubLatitude === undefined ||
+      clubLongitude === null ||
+      clubLongitude === undefined
+    ) {
+      return null;
+    }
+
+    const earthRadiusKm = 6371;
+    const latitudeDelta = this.toRadians(clubLatitude - userLatitude);
+    const longitudeDelta = this.toRadians(clubLongitude - userLongitude);
+    const startLatitude = this.toRadians(userLatitude);
+    const endLatitude = this.toRadians(clubLatitude);
+
+    const haversine =
+      Math.sin(latitudeDelta / 2) * Math.sin(latitudeDelta / 2) +
+      Math.cos(startLatitude) *
+        Math.cos(endLatitude) *
+        Math.sin(longitudeDelta / 2) *
+        Math.sin(longitudeDelta / 2);
+
+    const arc = 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
+    return Number((earthRadiusKm * arc).toFixed(2));
+  }
+
+  private toRadians(value: number) {
+    return (value * Math.PI) / 180;
   }
 
   formatTeeTime(isoDateTime: string) {

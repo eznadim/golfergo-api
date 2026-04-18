@@ -6,6 +6,7 @@ import { BookingDetailsService } from './booking-details.service';
 import { BookingHoldService } from './booking-hold.service';
 import { IdempotencyService } from './idempotency.service';
 import { BookingListService } from './booking-list.service';
+import { BookingQuickBookService } from './booking-quick-book.service';
 import { PhoneService } from './phone.service';
 import { BookingService } from './booking.service';
 import { BookingSlotService } from './booking-slot.service';
@@ -25,6 +26,7 @@ import { AuthModule } from '../auth/auth.module';
     BookingSubmitService,
     BookingDetailsService,
     BookingListService,
+    BookingQuickBookService,
     BookingUpdateService,
     BookingCancelService,
     IdempotencyService,
