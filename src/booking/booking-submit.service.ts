@@ -9,6 +9,78 @@ export class BookingSubmitService {
     private readonly phoneService: PhoneService,
   ) {}
 
+  async previewBooking(input: {
+    bookingRef: string;
+    caddieArrangement: 'none' | 'shared' | 'per_player';
+    buggyType: 'jumbo' | 'normal';
+    buggySharingPreference?: 'shared' | 'mixed' | 'single';
+    playerDetails: Array<{
+      name: string;
+      phoneNumber: string;
+      category: 'normal' | 'senior';
+      isHost: boolean;
+    }>;
+  }, userId: string) {
+    const aggregate = await this.bookingService.getBookingAggregateByRef(
+      input.bookingRef,
+    );
+    this.bookingService.assertBookingOwnedByUser(aggregate.booking, userId);
+    const displayStatus = this.bookingService.getDisplayStatus(aggregate.booking);
+
+    if (displayStatus === 'expired') {
+      throw new GoneException('Booking hold has expired');
+    }
+
+    if (displayStatus !== 'held') {
+      throw new ConflictException('Booking is not in held status');
+    }
+
+    const slotContext = await this.bookingService.getSlotContextById(
+      aggregate.booking.slot_id,
+    );
+    const availability = await this.bookingService.getSlotAvailability(
+      slotContext,
+      undefined,
+      aggregate.booking.booking_id,
+    );
+    const bookingConfig = this.bookingService.buildBookingConfigFromSubmit({
+      playType:
+        aggregate.booking.play_type === '9_holes' ? '9_holes' : '18_holes',
+      selectedNine: aggregate.booking.selected_nine,
+      caddieArrangement: input.caddieArrangement,
+      buggyType: input.buggyType,
+      buggySharingPreference: input.buggySharingPreference,
+      playerDetails: input.playerDetails,
+    });
+    const counts = this.bookingService.getRequestedBookingCounts(bookingConfig);
+    this.bookingService.ensureCapacityAvailable(counts, availability);
+    const pricing = this.bookingService.calculateBookingPricing(
+      availability,
+      bookingConfig,
+      counts,
+    );
+
+    return {
+      bookingRef: aggregate.booking.booking_ref,
+      status: displayStatus,
+      bookingSummary: {
+        golfClubName: aggregate.facility?.facility_name ?? aggregate.organization.name,
+        bookingDate: this.bookingService.extractDate(aggregate.slot.start_at),
+        teeTimeSlot: this.bookingService.formatTeeTime(aggregate.slot.start_at),
+        playType: bookingConfig.playType,
+        selectedNine: bookingConfig.selectedNine,
+        playerCount: bookingConfig.playerCount,
+        normalPlayerCount: bookingConfig.normalPlayerCount,
+        seniorPlayerCount: bookingConfig.seniorPlayerCount,
+        caddieArrangement: bookingConfig.caddieArrangement,
+        buggyType: bookingConfig.buggyType,
+        buggySharingPreference: bookingConfig.buggySharingPreference,
+        paymentMethod: bookingConfig.paymentMethod,
+      },
+      pricing,
+    };
+  }
+
   async submitBooking(input: {
     bookingRef: string;
     caddieArrangement: 'none' | 'shared' | 'per_player';

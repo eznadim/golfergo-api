@@ -13,6 +13,8 @@ import {
 } from '@nestjs/common';
 import { z } from 'zod';
 import { AppAuthGuard } from '../auth/app-auth.guard';
+import { AuthService } from '../auth/auth.service';
+import { BookingAdminService } from './booking-admin.service';
 import { BookingCancelService } from './booking-cancel.service';
 import { BookingClubService } from './booking-club.service';
 import { BookingDetailsService } from './booking-details.service';
@@ -53,6 +55,14 @@ const SubmitBookingSchema = z.object({
   acknowledgedTerms: z.literal(true),
 });
 
+const PreviewBookingSchema = z.object({
+  bookingRef: z.string().min(1),
+  caddieArrangement: z.enum(['none', 'shared', 'per_player']),
+  buggyType: z.enum(['jumbo', 'normal']),
+  buggySharingPreference: z.enum(['shared', 'mixed', 'single']).optional(),
+  playerDetails: z.array(PlayerDetailSchema).min(1),
+});
+
 const UpdateBookingSchema = z.object({
   hostName: z.string().min(1).optional(),
   hostPhoneNumber: z.string().min(1).optional(),
@@ -64,6 +74,11 @@ const UpdateBookingSchema = z.object({
 
 const CancelBookingSchema = z.object({
   reason: z.string().min(1),
+});
+
+const AdminSlotBoardSchema = z.object({
+  golfClubSlug: z.string().min(1),
+  bookingDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
 });
 
 const QuickBookSchema = z.object({
@@ -92,7 +107,9 @@ function parsePositiveInteger(
 @Controller('booking')
 export class BookingController {
   constructor(
+    private readonly authService: AuthService,
     private readonly bookingClubService: BookingClubService,
+    private readonly bookingAdminService: BookingAdminService,
     private readonly bookingSlotService: BookingSlotService,
     private readonly bookingHoldService: BookingHoldService,
     private readonly bookingSubmitService: BookingSubmitService,
@@ -106,6 +123,35 @@ export class BookingController {
   @Get('golf-clubs')
   getGolfClubs(@Query('slug') golfClubSlug?: string) {
     return this.bookingClubService.fetchGolfClubs(golfClubSlug);
+  }
+
+  @Get('admin/slot-board')
+  @UseGuards(AppAuthGuard)
+  async fetchAdminSlotBoard(
+    @Req() req: { appUser?: { sub: string } },
+    @Query('golfClubSlug') golfClubSlug?: string,
+    @Query('bookingDate') bookingDate?: string,
+  ) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    const data = AdminSlotBoardSchema.parse({ golfClubSlug, bookingDate });
+    return this.bookingAdminService.fetchAdminSlotBoard(data);
+  }
+
+  @Get('admin/bookings')
+  @UseGuards(AppAuthGuard)
+  async fetchAdminBookedBookings(@Req() req: { appUser?: { sub: string } }) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    return this.bookingAdminService.fetchAdminBookedBookings();
+  }
+
+  @Get('admin/:bookingRef')
+  @UseGuards(AppAuthGuard)
+  async fetchAdminBookingDetails(
+    @Param('bookingRef') bookingRef: string,
+    @Req() req: { appUser?: { sub: string } },
+  ) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    return this.bookingAdminService.fetchAdminBookingDetails(bookingRef);
   }
 
   @Post('available-slots')
@@ -149,6 +195,16 @@ export class BookingController {
   ) {
     const data = SubmitBookingSchema.parse(body);
     return this.bookingSubmitService.submitBooking(data, req.appUser?.sub ?? '');
+  }
+
+  @Post('preview')
+  @UseGuards(AppAuthGuard)
+  previewBooking(
+    @Body() body: unknown,
+    @Req() req: { appUser?: { sub: string } },
+  ) {
+    const data = PreviewBookingSchema.parse(body);
+    return this.bookingSubmitService.previewBooking(data, req.appUser?.sub ?? '');
   }
 
   @Get('list/upcoming')

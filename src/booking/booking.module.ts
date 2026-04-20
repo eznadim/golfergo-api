@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { BookingCancelService } from './booking-cancel.service';
+import { BookingAdminService } from './booking-admin.service';
 import { BookingClubService } from './booking-club.service';
 import { BookingController } from './booking.controller';
 import { BookingDetailsService } from './booking-details.service';
@@ -20,6 +21,7 @@ import { AuthModule } from '../auth/auth.module';
   controllers: [BookingController],
   providers: [
     BookingService,
+    BookingAdminService,
     BookingClubService,
     BookingSlotService,
     BookingHoldService,
