@@ -6,16 +6,21 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { jwtVerify } from 'jose';
+import { AuthService } from './auth.service';
 
 type AppSessionPayload = {
   sub: string;
+  sid?: string;
   phone?: string;
   type?: string;
 };
 
 @Injectable()
 export class AppAuthGuard implements CanActivate {
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly authService: AuthService,
+  ) {}
 
   async canActivate(ctx: ExecutionContext) {
     const req = ctx.switchToHttp().getRequest();
@@ -32,10 +37,15 @@ export class AppAuthGuard implements CanActivate {
 
     try {
       const { payload } = await jwtVerify(token, secret);
-      if (payload.type !== 'app-session' || typeof payload.sub !== 'string') {
+      if (
+        payload.type !== 'app-session' ||
+        typeof payload.sub !== 'string' ||
+        typeof payload.sid !== 'string'
+      ) {
         throw new UnauthorizedException('Invalid app session token');
       }
 
+      await this.authService.ensureSessionIsActive(payload.sid, payload.sub);
       req.appUser = payload as AppSessionPayload;
       return true;
     } catch {
