@@ -53,6 +53,7 @@ const SubmitBookingSchema = z.object({
   buggySharingPreference: z.enum(['shared', 'mixed', 'single']).optional(),
   playerDetails: z.array(PlayerDetailSchema).min(1),
   acknowledgedTerms: z.literal(true),
+  captchaToken: z.string().trim().min(1).optional(),
 });
 
 const PreviewBookingSchema = z.object({
@@ -102,6 +103,16 @@ function parsePositiveInteger(
   }
 
   return parsed;
+}
+
+function getRequestIp(req: {
+  ip?: string;
+  headers?: Record<string, string | string[] | undefined>;
+}) {
+  const forwardedFor = req.headers?.['x-forwarded-for'];
+  return Array.isArray(forwardedFor)
+    ? forwardedFor[0]
+    : forwardedFor?.split(',')[0]?.trim() || req.ip || null;
 }
 
 @Controller('booking')
@@ -189,11 +200,16 @@ export class BookingController {
 
   @Post('submit')
   @UseGuards(AppAuthGuard)
-  submitBooking(
+  async submitBooking(
     @Body() body: unknown,
-    @Req() req: { appUser?: { sub: string } },
+    @Req() req: {
+      appUser?: { sub: string };
+      ip?: string;
+      headers?: Record<string, string | string[] | undefined>;
+    },
   ) {
     const data = SubmitBookingSchema.parse(body);
+    await this.authService.verifyCaptcha(data.captchaToken, getRequestIp(req));
     return this.bookingSubmitService.submitBooking(data, req.appUser?.sub ?? '');
   }
 
