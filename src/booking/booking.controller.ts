@@ -115,6 +115,13 @@ function getRequestIp(req: {
     : forwardedFor?.split(',')[0]?.trim() || req.ip || null;
 }
 
+function getClientPlatform(req: {
+  headers?: Record<string, string | string[] | undefined>;
+}) {
+  const clientPlatform = req.headers?.['x-client-platform'];
+  return (Array.isArray(clientPlatform) ? clientPlatform[0] : clientPlatform) ?? null;
+}
+
 @Controller('booking')
 export class BookingController {
   constructor(
@@ -209,7 +216,16 @@ export class BookingController {
     },
   ) {
     const data = SubmitBookingSchema.parse(body);
-    await this.authService.verifyCaptcha(data.captchaToken, getRequestIp(req));
+    if (
+      !this.authService.isMobileClient({
+        clientPlatform: getClientPlatform(req),
+        userAgent: Array.isArray(req.headers?.['user-agent'])
+          ? req.headers?.['user-agent'][0]
+          : req.headers?.['user-agent'] ?? null,
+      })
+    ) {
+      await this.authService.verifyCaptcha(data.captchaToken, getRequestIp(req));
+    }
     return this.bookingSubmitService.submitBooking(data, req.appUser?.sub ?? '');
   }
 
