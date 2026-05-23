@@ -89,6 +89,7 @@ type UserRoleRow = {
 type AuthContext = {
   ipAddress?: string | null;
   userAgent?: string | null;
+  clientPlatform?: string | null;
 };
 
 type AuthSessionRow = {
@@ -160,7 +161,7 @@ export class AuthService {
     }
 
     await this.ensureOtpCooldown(normalizedPhoneNumber, input.purpose);
-    if (input.purpose === 'register') {
+    if (input.purpose === 'register' && !this.isMobileClient(context)) {
       await this.verifyCaptcha(input.captchaToken, context.ipAddress);
     }
 
@@ -1625,6 +1626,18 @@ export class AuthService {
         }),
       );
     }
+  }
+
+  isMobileClient(context: Pick<AuthContext, 'clientPlatform' | 'userAgent'>) {
+    const platform = context.clientPlatform?.toLowerCase();
+    if (platform === 'ios' || platform === 'android') {
+      return true;
+    }
+
+    const userAgent = context.userAgent?.toLowerCase() ?? '';
+    return /\b(dart|flutter|okhttp|cfnetwork|darwin|android|iphone|ipad)\b/.test(
+      userAgent,
+    );
   }
 
   private getJwtSecret() {

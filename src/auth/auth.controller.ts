@@ -64,6 +64,7 @@ function getAuthContext(req: {
   headers?: Record<string, string | string[] | undefined>;
 }) {
   const forwardedFor = req.headers?.['x-forwarded-for'];
+  const clientPlatform = req.headers?.['x-client-platform'];
   return {
     ipAddress: Array.isArray(forwardedFor)
       ? forwardedFor[0]
@@ -72,6 +73,9 @@ function getAuthContext(req: {
       (Array.isArray(req.headers?.['user-agent'])
         ? req.headers?.['user-agent'][0]
         : req.headers?.['user-agent']) ?? null,
+    clientPlatform:
+      (Array.isArray(clientPlatform) ? clientPlatform[0] : clientPlatform) ??
+      null,
   };
 }
 
