@@ -564,13 +564,31 @@ export class AuthService {
       user.user_id,
     );
 
-    const verification = await verifyRegistrationResponse({
-      response: input.credential,
-      expectedChallenge: challenge.challenge,
-      expectedOrigin: this.getWebAuthnOrigins(),
-      expectedRPID: challenge.rp_id,
-      requireUserVerification: true,
-    });
+    let verification: Awaited<ReturnType<typeof verifyRegistrationResponse>>;
+    try {
+      verification = await verifyRegistrationResponse({
+        response: input.credential,
+        expectedChallenge: challenge.challenge,
+        expectedOrigin: this.getWebAuthnOrigins(),
+        expectedRPID: challenge.rp_id,
+        requireUserVerification: true,
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Passkey registration verification failed.';
+      console.warn('Passkey registration verification failed', {
+        message,
+        expectedRPID: challenge.rp_id,
+        expectedOrigins: this.getWebAuthnOrigins(),
+      });
+      throw new UnauthorizedException(
+        this.errorPayload(
+          'PASSKEY_REGISTRATION_FAILED',
+          'Passkey registration failed.',
+          { verificationMessage: message },
+        ),
+      );
+    }
 
     if (!verification.verified || !verification.registrationInfo) {
       throw new UnauthorizedException(
@@ -650,14 +668,30 @@ export class AuthService {
       );
     }
 
-    const verification = await verifyAuthenticationResponse({
-      response: input.credential,
-      expectedChallenge: challenge.challenge,
-      expectedOrigin: this.getWebAuthnOrigins(),
-      expectedRPID: challenge.rp_id,
-      credential: this.toWebAuthnCredential(credential),
-      requireUserVerification: true,
-    });
+    let verification: Awaited<ReturnType<typeof verifyAuthenticationResponse>>;
+    try {
+      verification = await verifyAuthenticationResponse({
+        response: input.credential,
+        expectedChallenge: challenge.challenge,
+        expectedOrigin: this.getWebAuthnOrigins(),
+        expectedRPID: challenge.rp_id,
+        credential: this.toWebAuthnCredential(credential),
+        requireUserVerification: true,
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Passkey login verification failed.';
+      console.warn('Passkey login verification failed', {
+        message,
+        expectedRPID: challenge.rp_id,
+        expectedOrigins: this.getWebAuthnOrigins(),
+      });
+      throw new UnauthorizedException(
+        this.errorPayload('PASSKEY_LOGIN_FAILED', 'Passkey login failed.', {
+          verificationMessage: message,
+        }),
+      );
+    }
 
     if (!verification.verified) {
       throw new UnauthorizedException(
