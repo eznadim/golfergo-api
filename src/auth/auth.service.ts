@@ -138,7 +138,7 @@ export class AuthService {
     channel?: 'whatsapp';
     captchaToken?: string;
   }, context: AuthContext = {}) {
-    await this.verifyCaptcha(input.captchaToken);
+    await this.verifyCaptcha(input.captchaToken, context.ipAddress);
     const normalizedPhoneNumber = this.normalizePhoneNumber(input.phoneNumber);
     const existingUser = await this.findUserByPhoneNumber(normalizedPhoneNumber);
 
@@ -405,7 +405,8 @@ export class AuthService {
     };
   }
 
-  async loginWithPin(input: { phoneNumber: string; pin: string }, context: AuthContext = {}) {
+  async loginWithPin(input: { phoneNumber: string; pin: string; captchaToken?: string }, context: AuthContext = {}) {
+    await this.verifyCaptcha(input.captchaToken, context.ipAddress);
     const normalizedPhoneNumber = this.normalizePhoneNumber(input.phoneNumber);
     const user = await this.findUserByPhoneNumber(normalizedPhoneNumber);
 
@@ -511,7 +512,8 @@ export class AuthService {
     };
   }
 
-  async getPasskeyLoginOptions(input: { phoneNumber?: string | null }) {
+  async getPasskeyLoginOptions(input: { phoneNumber?: string | null; captchaToken?: string }) {
+    await this.verifyCaptcha(input.captchaToken);
     const user = input.phoneNumber
       ? await this.findUserByPhoneNumber(this.normalizePhoneNumber(input.phoneNumber))
       : null;
@@ -565,7 +567,7 @@ export class AuthService {
     const verification = await verifyRegistrationResponse({
       response: input.credential,
       expectedChallenge: challenge.challenge,
-      expectedOrigin: this.getWebAuthnOrigin(),
+      expectedOrigin: this.getWebAuthnOrigins(),
       expectedRPID: challenge.rp_id,
       requireUserVerification: true,
     });
@@ -651,7 +653,7 @@ export class AuthService {
     const verification = await verifyAuthenticationResponse({
       response: input.credential,
       expectedChallenge: challenge.challenge,
-      expectedOrigin: this.getWebAuthnOrigin(),
+      expectedOrigin: this.getWebAuthnOrigins(),
       expectedRPID: challenge.rp_id,
       credential: this.toWebAuthnCredential(credential),
       requireUserVerification: true,
@@ -1532,7 +1534,7 @@ export class AuthService {
     };
   }
 
-  private async verifyCaptcha(captchaToken?: string) {
+  async verifyCaptcha(captchaToken?: string, ipAddress?: string | null) {
     const secret = this.config.get<string>('CAPTCHA_SECRET');
     const provider = this.config.get<string>('CAPTCHA_PROVIDER') ?? 'turnstile';
     const mustVerify =
@@ -1552,19 +1554,41 @@ export class AuthService {
       provider === 'recaptcha'
         ? 'https://www.google.com/recaptcha/api/siteverify'
         : 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
+    const body = new URLSearchParams({
+      secret,
+      response: captchaToken,
+    });
+
+    if (ipAddress) {
+      body.set('remoteip', ipAddress);
+    }
+
     const response = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        secret,
-        response: captchaToken,
-      }),
+      body,
     });
-    const result = (await response.json()) as { success?: boolean };
+    const result = (await response.json()) as {
+      success?: boolean;
+      'error-codes'?: string[];
+      hostname?: string;
+      action?: string;
+      cdata?: string;
+    };
 
     if (!response.ok || !result.success) {
+      const errorCodes = result['error-codes'] ?? [];
+      console.warn('Captcha verification failed', {
+        provider,
+        status: response.status,
+        errorCodes,
+        hostname: result.hostname,
+        action: result.action,
+      });
       throw new BadRequestException(
-        this.errorPayload('CAPTCHA_FAILED', 'Captcha verification failed.'),
+        this.errorPayload('CAPTCHA_FAILED', 'Captcha verification failed.', {
+          captchaErrorCodes: errorCodes,
+        }),
       );
     }
   }
@@ -1581,6 +1605,19 @@ export class AuthService {
   }
 
   private getWebAuthnOrigin() {
-    return this.config.get<string>('WEBAUTHN_ORIGIN') ?? 'http://localhost:3000';
+    return this.getWebAuthnOrigins()[0];
+  }
+
+  private getWebAuthnOrigins() {
+    const configuredOrigins =
+      this.config.get<string>('WEBAUTHN_ORIGINS') ??
+      this.config.get<string>('WEBAUTHN_ORIGIN');
+
+    return (
+      configuredOrigins
+        ?.split(',')
+        .map((origin) => origin.trim())
+        .filter(Boolean) ?? ['http://localhost:3000']
+    );
   }
 }
