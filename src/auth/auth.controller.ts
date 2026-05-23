@@ -31,7 +31,6 @@ const PinSetupSchema = z.object({
 const PinLoginSchema = z.object({
   phoneNumber: z.string().trim().min(1),
   pin: z.string().regex(/^\d{6}$/),
-  captchaToken: z.string().trim().min(1).optional(),
 });
 
 const LoginOptionsSchema = z.object({
@@ -42,7 +41,6 @@ const PasskeyOptionsSchema = z.object({
   phoneNumber: z.string().trim().min(1).optional().nullable(),
   deviceLabel: z.string().trim().min(1).optional(),
   platform: z.string().trim().min(1).optional(),
-  captchaToken: z.string().trim().min(1).optional(),
 });
 
 const PasskeyRegisterVerifySchema = z.object({

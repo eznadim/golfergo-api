@@ -138,7 +138,6 @@ export class AuthService {
     channel?: 'whatsapp';
     captchaToken?: string;
   }, context: AuthContext = {}) {
-    await this.verifyCaptcha(input.captchaToken, context.ipAddress);
     const normalizedPhoneNumber = this.normalizePhoneNumber(input.phoneNumber);
     const existingUser = await this.findUserByPhoneNumber(normalizedPhoneNumber);
 
@@ -161,6 +160,9 @@ export class AuthService {
     }
 
     await this.ensureOtpCooldown(normalizedPhoneNumber, input.purpose);
+    if (input.purpose === 'register') {
+      await this.verifyCaptcha(input.captchaToken, context.ipAddress);
+    }
 
     const otp = this.generateOtpCode();
     const now = new Date();
@@ -405,8 +407,7 @@ export class AuthService {
     };
   }
 
-  async loginWithPin(input: { phoneNumber: string; pin: string; captchaToken?: string }, context: AuthContext = {}) {
-    await this.verifyCaptcha(input.captchaToken, context.ipAddress);
+  async loginWithPin(input: { phoneNumber: string; pin: string }, context: AuthContext = {}) {
     const normalizedPhoneNumber = this.normalizePhoneNumber(input.phoneNumber);
     const user = await this.findUserByPhoneNumber(normalizedPhoneNumber);
 
@@ -512,8 +513,7 @@ export class AuthService {
     };
   }
 
-  async getPasskeyLoginOptions(input: { phoneNumber?: string | null; captchaToken?: string }) {
-    await this.verifyCaptcha(input.captchaToken);
+  async getPasskeyLoginOptions(input: { phoneNumber?: string | null }) {
     const user = input.phoneNumber
       ? await this.findUserByPhoneNumber(this.normalizePhoneNumber(input.phoneNumber))
       : null;
