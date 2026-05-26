@@ -191,6 +191,11 @@ export class BookingController {
     return this.bookingQuickBookService.fetchQuickBook(data);
   }
 
+  @Post('slots/:slotId/details')
+  getSlotDetails(@Param('slotId') slotId: string) {
+    return this.bookingSlotService.fetchSlotDetails(slotId);
+  }
+
   @Post('hold')
   @UseGuards(AppAuthGuard)
   createBookingHold(
