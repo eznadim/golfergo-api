@@ -303,6 +303,7 @@ type GolfClubListItem = {
   slug: string;
   name: string;
   address: string;
+  email: string | null;
   isBookable: boolean;
   availabilityLabel: string;
   latitude: number | null;
@@ -328,65 +329,88 @@ export class BookingService {
 
   async fetchGolfClubList() {
     const sport = await this.getGolfSport();
+    const organizations = await this.getGolfOrganizations();
     const organizationSports = await this.getOrganizationSportsBySportId(
       sport.sport_id,
-    );
-    const organizations = await this.getOrganizationsByIds(
-      organizationSports.map((item) => item.organization_id),
     );
     const facilities = await this.getFacilitiesByOrganizationSportIds(
       organizationSports.map((item) => item.organization_sport_id),
     );
+    const organizationSportByOrganizationId = new Map(
+      organizationSports.map((item) => [item.organization_id, item]),
+    );
+    const facilityByOrganizationSportId = new Map(
+      facilities.map((item) => [item.organization_sport_id, item]),
+    );
 
-    return organizationSports
-      .map((organizationSport) => {
-        const organization = organizations.get(
-          organizationSport.organization_id,
-        );
-        const facility = facilities.find(
-          (item) =>
-            item.organization_sport_id ===
+    return organizations.map((organization) => {
+      const organizationSport = organizationSportByOrganizationId.get(
+        organization.organization_id,
+      );
+      const facility = organizationSport
+        ? (facilityByOrganizationSportId.get(
             organizationSport.organization_sport_id,
-        );
+          ) ?? null)
+        : null;
 
-        if (!organization || !facility) {
-          return null;
-        }
-
-        return {
-          id: facility.facility_id,
-          slug: organization.slug,
-          name: facility.facility_name || organization.name,
-          address: organization.address ?? '',
-          isBookable: this.isBookableClub(organization.slug),
-          availabilityLabel: this.isBookableClub(organization.slug)
-            ? 'Booking available'
-            : 'Coming soon',
-          noOfHoles: this.toNumber(facility.no_of_holes),
-          supportsNineHoles: false,
-          supportedNines: [],
-          buggyPolicy: 'required',
-          paymentMethods: ['pay_counter'],
-          updatedAt: organization.created_at ?? new Date().toISOString(),
-        };
-      })
-      .filter((item): item is NonNullable<typeof item> => item !== null);
+      return this.buildGolfClubSummaryFromRows(
+        organization,
+        organizationSport ?? null,
+        facility,
+      );
+    });
   }
 
   async fetchGolfClubDetails(golfClubSlug: string) {
-    const clubContext = await this.getClubContextBySlug(golfClubSlug);
-    const club = this.buildGolfClubSummary(clubContext);
-    const nextAvailableSlot =
-      await this.getNextAvailableSlotForClub(clubContext);
+    const sport = await this.getGolfSport();
+    const organization = await this.getOrganizationBySlug(golfClubSlug);
+    const organizationSport = await this.getOrganizationSportForOrganization(
+      organization.organization_id,
+      sport.sport_id,
+    );
+    const facility = organizationSport
+      ? await this.getFacilityByOrganizationSportId(
+          organizationSport.organization_sport_id,
+        )
+      : null;
+    const club = this.buildGolfClubSummaryFromRows(
+      organization,
+      organizationSport,
+      facility,
+    );
+
+    let nextAvailableSlot: Awaited<
+      ReturnType<BookingService['getNextAvailableSlotForClub']>
+    > = null;
+
+    if (organizationSport && facility) {
+      const resourceCatalog = await this.getResourceCatalog(sport.sport_id);
+      const teeInstances = await this.getResourceInstancesByResourceIds(
+        organization.organization_id,
+        resourceCatalog.byType.tee_time.map((item) => item.resource_id),
+      );
+
+      nextAvailableSlot = await this.getNextAvailableSlotForClub({
+        organization,
+        organizationSport,
+        facility,
+        resourceCatalog,
+        teeInstancesById: new Map(
+          teeInstances.map((instance) => [
+            instance.resource_instance_id,
+            instance,
+          ]),
+        ),
+      });
+    }
 
     return {
       club: {
         ...club,
-        organizationId: clubContext.organization.organization_id,
-        organizationSportId:
-          clubContext.organizationSport.organization_sport_id,
-        facilityId: clubContext.facility.facility_id,
-        facilityCapacity: this.toNumber(clubContext.facility.capacity),
+        organizationId: organization.organization_id,
+        organizationSportId: organizationSport?.organization_sport_id ?? null,
+        facilityId: facility?.facility_id ?? null,
+        facilityCapacity: this.toNumber(facility?.capacity),
       },
       bookingConfig: {
         supportedPlayTypes: ['18_holes'],
@@ -690,6 +714,23 @@ export class BookingService {
     return (result.data ?? []) as OrganizationSportRow[];
   }
 
+  private async getGolfOrganizations() {
+    const result = await this.supabase.client
+      .from('organization')
+      .select(
+        'organization_id, name, email, address, slug, latitude, longitude, created_at',
+      )
+      .not('slug', 'is', null)
+      .neq('slug', '')
+      .order('name', { ascending: true });
+
+    if (result.error) {
+      this.throwSupabaseError(result.error.message);
+    }
+
+    return (result.data ?? []) as OrganizationRow[];
+  }
+
   private async getOrganizationsByIds(organizationIds: string[]) {
     if (organizationIds.length === 0) {
       return new Map<string, OrganizationRow>();
@@ -735,6 +776,63 @@ export class BookingService {
     return (result.data ?? []) as FacilityRow[];
   }
 
+  private async getOrganizationBySlug(golfClubSlug: string) {
+    const result = await this.supabase.client
+      .from('organization')
+      .select(
+        'organization_id, name, email, address, slug, latitude, longitude, created_at',
+      )
+      .eq('slug', golfClubSlug)
+      .maybeSingle<OrganizationRow>();
+
+    if (result.error) {
+      this.throwSupabaseError(result.error.message);
+    }
+
+    if (!result.data) {
+      throw new NotFoundException(
+        `Golf club not found for slug: ${golfClubSlug}`,
+      );
+    }
+
+    return result.data;
+  }
+
+  private async getOrganizationSportForOrganization(
+    organizationId: string,
+    sportId: string,
+  ) {
+    const result = await this.supabase.client
+      .from('organization_sport')
+      .select('organization_sport_id, organization_id, sport_id')
+      .eq('organization_id', organizationId)
+      .eq('sport_id', sportId)
+      .maybeSingle<OrganizationSportRow>();
+
+    if (result.error) {
+      this.throwSupabaseError(result.error.message);
+    }
+
+    return result.data ?? null;
+  }
+
+  private async getFacilityByOrganizationSportId(organizationSportId: string) {
+    const result = await this.supabase.client
+      .from('facility')
+      .select(
+        'facility_id, organization_sport_id, facility_name, capacity, no_of_holes',
+      )
+      .eq('organization_sport_id', organizationSportId)
+      .limit(1)
+      .maybeSingle<FacilityRow>();
+
+    if (result.error) {
+      this.throwSupabaseError(result.error.message);
+    }
+
+    return result.data ?? null;
+  }
+
   private async getFacilityForOrganizationSport(
     organizationId: string,
     sportId: string,
@@ -771,7 +869,9 @@ export class BookingService {
   }
 
   private async getAllClubContexts() {
-    const golfClubs = await this.fetchGolfClubList();
+    const golfClubs = (await this.fetchGolfClubList()).filter(
+      (club) => club.isBookable,
+    );
 
     return Promise.all(
       golfClubs.map((club) => this.getClubContextBySlug(club.slug)),
@@ -886,24 +986,37 @@ export class BookingService {
   }
 
   private buildGolfClubSummary(clubContext: ClubContext): GolfClubListItem {
+    return this.buildGolfClubSummaryFromRows(
+      clubContext.organization,
+      clubContext.organizationSport,
+      clubContext.facility,
+    );
+  }
+
+  private buildGolfClubSummaryFromRows(
+    organization: OrganizationRow,
+    organizationSport: OrganizationSportRow | null,
+    facility: FacilityRow | null,
+  ): GolfClubListItem {
+    const hasBookingSetup = Boolean(organizationSport && facility);
+    const isBookable = hasBookingSetup && this.isBookableClub(organization.slug);
+
     return {
-      id: clubContext.facility.facility_id,
-      slug: clubContext.organization.slug,
-      name: clubContext.facility.facility_name || clubContext.organization.name,
-      address: clubContext.organization.address ?? '',
-      isBookable: this.isBookableClub(clubContext.organization.slug),
-      availabilityLabel: this.isBookableClub(clubContext.organization.slug)
-        ? 'Booking available'
-        : 'Coming soon',
-      latitude: this.toNullableNumber(clubContext.organization.latitude),
-      longitude: this.toNullableNumber(clubContext.organization.longitude),
-      noOfHoles: this.toNumber(clubContext.facility.no_of_holes),
+      id: facility?.facility_id ?? organization.organization_id,
+      slug: organization.slug,
+      name: facility?.facility_name || organization.name,
+      address: organization.address ?? '',
+      email: organization.email,
+      isBookable,
+      availabilityLabel: isBookable ? 'Booking available' : 'Coming soon',
+      latitude: this.toNullableNumber(organization.latitude),
+      longitude: this.toNullableNumber(organization.longitude),
+      noOfHoles: this.toNumber(facility?.no_of_holes),
       supportsNineHoles: false,
       supportedNines: [],
       buggyPolicy: 'required',
       paymentMethods: ['pay_counter'],
-      updatedAt:
-        clubContext.organization.created_at ?? new Date().toISOString(),
+      updatedAt: organization.created_at ?? new Date().toISOString(),
     };
   }
 
