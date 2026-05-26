@@ -1,12 +1,17 @@
 import { Injectable } from '@nestjs/common';
 import { BookingService } from './booking.service';
+import { VoucherService } from './voucher.service';
 
 @Injectable()
 export class BookingCancelService {
-  constructor(private readonly bookingService: BookingService) {}
+  constructor(
+    private readonly bookingService: BookingService,
+    private readonly voucherService: VoucherService,
+  ) {}
 
   async cancelBooking(bookingRef: string, reason: string, userId: string) {
-    const aggregate = await this.bookingService.getBookingAggregateByRef(bookingRef);
+    const aggregate =
+      await this.bookingService.getBookingAggregateByRef(bookingRef);
     this.bookingService.assertBookingOwnedByUser(aggregate.booking, userId);
     const oldStatus = this.bookingService.getDisplayStatus(aggregate.booking);
     const now = new Date().toISOString();
@@ -22,6 +27,10 @@ export class BookingCancelService {
       aggregate.booking.booking_id,
       oldStatus === 'expired' ? 'held' : oldStatus,
       'cancelled',
+    );
+    await this.voucherService.cancelOrExpireVoucherRedemption(
+      aggregate.booking.booking_id,
+      oldStatus === 'expired' ? 'expired' : 'cancelled',
     );
 
     return {

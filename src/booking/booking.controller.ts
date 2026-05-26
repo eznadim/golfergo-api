@@ -42,16 +42,18 @@ const CreateHoldSchema = z.object({
 const PlayerDetailSchema = z.object({
   name: z.string().min(1),
   phoneNumber: z.string().min(1),
-  category: z.enum(['normal', 'senior']),
+  category: z.enum(['adult', 'normal', 'senior', 'junior']),
   isHost: z.boolean(),
 });
 
 const SubmitBookingSchema = z.object({
   bookingRef: z.string().min(1),
   caddieArrangement: z.enum(['none', 'shared', 'per_player']),
-  buggyType: z.enum(['jumbo', 'normal']),
+  buggyType: z.enum(['jumbo', 'normal']).optional(),
+  buggyQuantity: z.number().int().min(1).max(3).optional(),
   buggySharingPreference: z.enum(['shared', 'mixed', 'single']).optional(),
   playerDetails: z.array(PlayerDetailSchema).min(1),
+  voucherCode: z.string().trim().min(1).optional(),
   acknowledgedTerms: z.literal(true),
   captchaToken: z.string().trim().min(1).optional(),
 });
@@ -59,9 +61,11 @@ const SubmitBookingSchema = z.object({
 const PreviewBookingSchema = z.object({
   bookingRef: z.string().min(1),
   caddieArrangement: z.enum(['none', 'shared', 'per_player']),
-  buggyType: z.enum(['jumbo', 'normal']),
+  buggyType: z.enum(['jumbo', 'normal']).optional(),
+  buggyQuantity: z.number().int().min(1).max(3).optional(),
   buggySharingPreference: z.enum(['shared', 'mixed', 'single']).optional(),
   playerDetails: z.array(PlayerDetailSchema).min(1),
+  voucherCode: z.string().trim().min(1).optional(),
 });
 
 const UpdateBookingSchema = z.object({
@@ -69,6 +73,7 @@ const UpdateBookingSchema = z.object({
   hostPhoneNumber: z.string().min(1).optional(),
   caddieArrangement: z.enum(['none', 'shared', 'per_player']).optional(),
   buggyType: z.enum(['jumbo', 'normal']).optional(),
+  buggyQuantity: z.number().int().min(1).max(3).optional(),
   buggySharingPreference: z.enum(['shared', 'mixed', 'single']).optional(),
   playerDetails: z.array(PlayerDetailSchema).min(1).optional(),
 });
@@ -119,7 +124,9 @@ function getClientPlatform(req: {
   headers?: Record<string, string | string[] | undefined>;
 }) {
   const clientPlatform = req.headers?.['x-client-platform'];
-  return (Array.isArray(clientPlatform) ? clientPlatform[0] : clientPlatform) ?? null;
+  return (
+    (Array.isArray(clientPlatform) ? clientPlatform[0] : clientPlatform) ?? null
+  );
 }
 
 @Controller('booking')
@@ -209,7 +216,8 @@ export class BookingController {
   @UseGuards(AppAuthGuard)
   async submitBooking(
     @Body() body: unknown,
-    @Req() req: {
+    @Req()
+    req: {
       appUser?: { sub: string };
       ip?: string;
       headers?: Record<string, string | string[] | undefined>;
@@ -221,12 +229,30 @@ export class BookingController {
         clientPlatform: getClientPlatform(req),
         userAgent: Array.isArray(req.headers?.['user-agent'])
           ? req.headers?.['user-agent'][0]
-          : req.headers?.['user-agent'] ?? null,
+          : (req.headers?.['user-agent'] ?? null),
       })
     ) {
-      await this.authService.verifyCaptcha(data.captchaToken, getRequestIp(req));
+      await this.authService.verifyCaptcha(
+        data.captchaToken,
+        getRequestIp(req),
+      );
     }
-    return this.bookingSubmitService.submitBooking(data, req.appUser?.sub ?? '');
+    return this.bookingSubmitService.submitBooking(
+      data,
+      req.appUser?.sub ?? '',
+    );
+  }
+
+  @Post(':bookingRef/extend-hold')
+  @UseGuards(AppAuthGuard)
+  extendBookingHold(
+    @Param('bookingRef') bookingRef: string,
+    @Req() req: { appUser?: { sub: string } },
+  ) {
+    return this.bookingHoldService.extendBookingHold(
+      bookingRef,
+      req.appUser?.sub ?? '',
+    );
   }
 
   @Post('preview')
@@ -236,7 +262,10 @@ export class BookingController {
     @Req() req: { appUser?: { sub: string } },
   ) {
     const data = PreviewBookingSchema.parse(body);
-    return this.bookingSubmitService.previewBooking(data, req.appUser?.sub ?? '');
+    return this.bookingSubmitService.previewBooking(
+      data,
+      req.appUser?.sub ?? '',
+    );
   }
 
   @Get('list/upcoming')

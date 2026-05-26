@@ -60,9 +60,9 @@ export class BookingAdminService {
     return 'open';
   }
 
-  private getPrimaryAggregateForSlot(aggregates: Awaited<
-    ReturnType<BookingService['buildBookingAggregate']>
-  >[]) {
+  private getPrimaryAggregateForSlot(
+    aggregates: Awaited<ReturnType<BookingService['buildBookingAggregate']>>[],
+  ) {
     return [...aggregates].sort((left, right) => {
       const leftStatus = this.bookingService.getDisplayStatus(left.booking);
       const rightStatus = this.bookingService.getDisplayStatus(right.booking);
@@ -94,14 +94,25 @@ export class BookingAdminService {
     })[0];
   }
 
-  private getSlotStatusFromAggregates(aggregates: Awaited<
-    ReturnType<BookingService['buildBookingAggregate']>
-  >[]): SlotBoardStatus {
-    if (aggregates.some((aggregate) => this.bookingService.getDisplayStatus(aggregate.booking) === 'confirmed')) {
+  private getSlotStatusFromAggregates(
+    aggregates: Awaited<ReturnType<BookingService['buildBookingAggregate']>>[],
+  ): SlotBoardStatus {
+    if (
+      aggregates.some(
+        (aggregate) =>
+          this.bookingService.getDisplayStatus(aggregate.booking) ===
+          'confirmed',
+      )
+    ) {
       return 'confirmed';
     }
 
-    if (aggregates.some((aggregate) => this.bookingService.getDisplayStatus(aggregate.booking) === 'held')) {
+    if (
+      aggregates.some(
+        (aggregate) =>
+          this.bookingService.getDisplayStatus(aggregate.booking) === 'held',
+      )
+    ) {
       return 'held';
     }
 
@@ -116,7 +127,9 @@ export class BookingAdminService {
     const selectedClub = clubs.find((club) => club.slug === input.golfClubSlug);
 
     if (!selectedClub) {
-      throw new NotFoundException(`Golf club not found for slug: ${input.golfClubSlug}`);
+      throw new NotFoundException(
+        `Golf club not found for slug: ${input.golfClubSlug}`,
+      );
     }
 
     const slotResponses = await Promise.all([
@@ -125,38 +138,35 @@ export class BookingAdminService {
         bookingDate: input.bookingDate,
         playType: '18_holes',
       }),
-      ...(selectedClub.supportsNineHoles
-        ? selectedClub.supportedNines.map((selectedNine) =>
-            this.bookingService.fetchAvailableSlots({
-              golfClubSlug: input.golfClubSlug,
-              bookingDate: input.bookingDate,
-              playType: '9_holes',
-              selectedNine,
-            }),
-          )
-          : []),
     ]);
 
     const bookingRows = await this.bookingService.getBookingRowsForList();
     const relevantAggregates = (
       await Promise.all(
-        bookingRows.map((booking) => this.bookingService.buildBookingAggregate(booking)),
+        bookingRows.map((booking) =>
+          this.bookingService.buildBookingAggregate(booking),
+        ),
       )
     )
       .filter(
         (aggregate) =>
           aggregate.organization.slug === input.golfClubSlug &&
-            this.bookingService.extractDate(aggregate.slot.start_at) === input.bookingDate,
+          this.bookingService.extractDate(aggregate.slot.start_at) ===
+            input.bookingDate,
       )
-      .filter(
-        (aggregate) => {
-          const status = this.bookingService.getDisplayStatus(aggregate.booking);
-          return status === 'held' || status === 'confirmed' || status === 'completed' || status === 'cancelled';
-        },
-      )
+      .filter((aggregate) => {
+        const status = this.bookingService.getDisplayStatus(aggregate.booking);
+        return (
+          status === 'held' ||
+          status === 'confirmed' ||
+          status === 'completed' ||
+          status === 'cancelled'
+        );
+      })
       .sort(
         (left, right) =>
-          new Date(left.slot.start_at).getTime() - new Date(right.slot.start_at).getTime(),
+          new Date(left.slot.start_at).getTime() -
+          new Date(right.slot.start_at).getTime(),
       );
 
     const bookingAggregatesBySlotId = new Map<
@@ -165,7 +175,8 @@ export class BookingAdminService {
     >();
 
     for (const aggregate of relevantAggregates) {
-      const existing = bookingAggregatesBySlotId.get(aggregate.slot.slot_id) ?? [];
+      const existing =
+        bookingAggregatesBySlotId.get(aggregate.slot.slot_id) ?? [];
       existing.push(aggregate);
       bookingAggregatesBySlotId.set(aggregate.slot.slot_id, existing);
     }
@@ -174,7 +185,7 @@ export class BookingAdminService {
 
     for (const response of slotResponses) {
       for (const slot of response.slots) {
-        const slotKey = `${slot.slotId}:${response.playType}:${response.selectedNine ?? 'all'}`;
+        const slotKey = `${slot.slotId}:${response.playType}:all`;
 
         slotItems.set(slotKey, {
           slotKey,
@@ -183,7 +194,7 @@ export class BookingAdminService {
           startAt: slot.startAt,
           endAt: slot.endAt,
           playType: response.playType,
-          selectedNine: response.selectedNine,
+          selectedNine: null,
           status: 'open',
           remainingPlayerCapacity: slot.remainingPlayerCapacity,
           currency: slot.currency,
@@ -199,11 +210,12 @@ export class BookingAdminService {
         primaryAggregate.booking,
         primaryAggregate.lineItems,
       );
-      const existingItem = [...slotItems.values()].find((item) => item.slotId === slotId);
+      const existingItem = [...slotItems.values()].find(
+        (item) => item.slotId === slotId,
+      );
       const slotStatus = this.getSlotStatusFromAggregates(aggregates);
       const slotKey =
-        existingItem?.slotKey ??
-        `${slotId}:${config.playType}:${config.selectedNine ?? 'all'}`;
+        existingItem?.slotKey ?? `${slotId}:${config.playType}:all`;
 
       slotItems.set(slotKey, {
         slotKey,
@@ -214,16 +226,21 @@ export class BookingAdminService {
         startAt: existingItem?.startAt ?? primaryAggregate.slot.start_at,
         endAt: existingItem?.endAt ?? primaryAggregate.slot.end_at,
         playType: existingItem?.playType ?? config.playType,
-        selectedNine: existingItem?.selectedNine ?? config.selectedNine,
+        selectedNine: null,
         status: slotStatus,
         remainingPlayerCapacity: existingItem?.remainingPlayerCapacity ?? 0,
         currency: existingItem?.currency ?? 'MYR',
         fromPrice:
           existingItem?.fromPrice ??
-          this.bookingService.toNumber(primaryAggregate.slot.base_price),
+          primaryAggregate.booking.pricing_snapshot?.prices.basePrice ??
+          this.bookingService.toNumber(
+            primaryAggregate.booking.estimated_total_amount,
+          ),
         booking: {
           bookingRef: primaryAggregate.booking.booking_ref,
-          status: this.bookingService.getDisplayStatus(primaryAggregate.booking),
+          status: this.bookingService.getDisplayStatus(
+            primaryAggregate.booking,
+          ),
           hostName:
             primaryAggregate.hostUser?.name ??
             primaryAggregate.players[0]?.name ??
@@ -234,7 +251,9 @@ export class BookingAdminService {
             primaryAggregate.players[0]?.phone_number ??
             '',
           playerCount: config.playerCount,
-          grandTotal: this.bookingService.toNumber(primaryAggregate.booking.total_amount),
+          grandTotal: this.bookingService.toNumber(
+            primaryAggregate.booking.total_amount,
+          ),
           currency: 'MYR',
         },
       });
@@ -269,7 +288,9 @@ export class BookingAdminService {
   async fetchAdminBookedBookings() {
     const bookingRows = await this.bookingService.getBookingRowsForList();
     const aggregates = await Promise.all(
-      bookingRows.map((booking) => this.bookingService.buildBookingAggregate(booking)),
+      bookingRows.map((booking) =>
+        this.bookingService.buildBookingAggregate(booking),
+      ),
     );
 
     const items: AdminBookedListItem[] = aggregates
@@ -287,19 +308,22 @@ export class BookingAdminService {
           aggregate.booking,
           aggregate.lineItems,
         );
-        const status = this.bookingService.getDisplayStatus(aggregate.booking) as
-          | 'confirmed'
-          | 'completed';
+        const status = this.bookingService.getDisplayStatus(
+          aggregate.booking,
+        ) as 'confirmed' | 'completed';
 
         return {
           bookingRef: aggregate.booking.booking_ref,
           status,
-          golfClubName: aggregate.facility?.facility_name ?? aggregate.organization.name,
+          golfClubName:
+            aggregate.facility?.facility_name ?? aggregate.organization.name,
           golfClubSlug: aggregate.organization.slug,
           bookingDate: this.bookingService.extractDate(aggregate.slot.start_at),
-          teeTimeSlot: this.bookingService.formatTeeTime(aggregate.slot.start_at),
+          teeTimeSlot: this.bookingService.formatTeeTime(
+            aggregate.slot.start_at,
+          ),
           playType: config.playType,
-          selectedNine: config.selectedNine,
+          selectedNine: null,
           hostName:
             aggregate.hostUser?.name ?? aggregate.players[0]?.name ?? 'Unknown',
           hostPhoneNumber:
@@ -308,7 +332,9 @@ export class BookingAdminService {
             aggregate.players[0]?.phone_number ??
             '',
           playerCount: config.playerCount,
-          grandTotal: this.bookingService.toNumber(aggregate.booking.total_amount),
+          grandTotal: this.bookingService.toNumber(
+            aggregate.booking.total_amount,
+          ),
           currency: 'MYR',
           createdAt: aggregate.booking.created_at,
         };

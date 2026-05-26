@@ -32,9 +32,16 @@ export class BookingHoldService {
       return this.bookingService.buildHoldResponse(aggregate);
     }
 
-    const slotContext = await this.bookingService.getSlotContextById(input.slotId);
-    const availability = await this.bookingService.getSlotAvailability(slotContext);
+    const slotContext = await this.bookingService.getSlotContextById(
+      input.slotId,
+    );
+    const availability =
+      await this.bookingService.getSlotAvailability(slotContext);
     this.bookingService.ensureSlotCanBeHeld(availability);
+    const pricingSnapshot = await this.bookingService.buildPricingSnapshot(
+      slotContext,
+      availability,
+    );
 
     const normalizedPhoneNumber = this.phoneService.normalizePhoneNumber(
       input.hostPhoneNumber,
@@ -61,6 +68,7 @@ export class BookingHoldService {
     const bookingId = randomUUID();
     const bookingRef = this.bookingService.generateBookingRef();
     const holdExpiresAt = new Date(Date.now() + 300 * 1000).toISOString();
+    const initialSubtotal = availability.teeTimeUnitPrice;
 
     await this.bookingService.insertBooking({
       booking_id: bookingId,
@@ -84,17 +92,24 @@ export class BookingHoldService {
         slotContext.teeInstance,
         slotContext.slot,
       ),
-      selected_nine: this.bookingService.getSlotSelectedNine(
-        slotContext.teeInstance,
-        slotContext.slot,
-      ),
+      selected_nine: null,
       buggy_type: null,
       buggy_sharing_preference: null,
       caddy_arrangement: null,
       payment_method: 'pay_counter',
-      estimated_total_amount: null,
+      estimated_total_amount: initialSubtotal,
+      subtotal_amount: initialSubtotal,
+      discount_amount: 0,
+      voucher_id: null,
+      voucher_code: null,
+      final_amount: initialSubtotal,
+      pricing_snapshot: pricingSnapshot,
     });
-    await this.bookingService.insertBookingStatusHistory(bookingId, null, 'held');
+    await this.bookingService.insertBookingStatusHistory(
+      bookingId,
+      null,
+      'held',
+    );
     await this.idempotencyService.saveBookingHold(
       idempotencyKey,
       visitorId,
@@ -102,7 +117,32 @@ export class BookingHoldService {
       bookingId,
     );
 
-    const aggregate = await this.bookingService.getBookingAggregateById(bookingId);
+    const aggregate =
+      await this.bookingService.getBookingAggregateById(bookingId);
     return this.bookingService.buildHoldResponse(aggregate);
+  }
+
+  async extendBookingHold(bookingRef: string, userId: string) {
+    const aggregate =
+      await this.bookingService.getBookingAggregateByRef(bookingRef);
+    this.bookingService.assertBookingOwnedByUser(aggregate.booking, userId);
+
+    if (this.bookingService.getDisplayStatus(aggregate.booking) === 'expired') {
+      throw new ConflictException('Booking hold has expired');
+    }
+
+    if (aggregate.booking.status !== 'held') {
+      throw new ConflictException('Booking is not in held status');
+    }
+
+    await this.bookingService.updateBookingRow(aggregate.booking.booking_id, {
+      hold_expires_at: new Date(Date.now() + 300 * 1000).toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    const refreshed = await this.bookingService.getBookingAggregateById(
+      aggregate.booking.booking_id,
+    );
+    return this.bookingService.buildHoldResponse(refreshed);
   }
 }

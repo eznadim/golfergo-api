@@ -7,12 +7,14 @@ import { BookingDetailsService } from './booking-details.service';
 import { BookingHoldService } from './booking-hold.service';
 import { IdempotencyService } from './idempotency.service';
 import { BookingListService } from './booking-list.service';
+import { BookingNotificationService } from './booking-notification.service';
 import { BookingQuickBookService } from './booking-quick-book.service';
 import { PhoneService } from './phone.service';
 import { BookingService } from './booking.service';
 import { BookingSlotService } from './booking-slot.service';
 import { BookingSubmitService } from './booking-submit.service';
 import { BookingUpdateService } from './booking-update.service';
+import { VoucherService } from './voucher.service';
 import { SupabaseModule } from '../supabase/supabase.module';
 import { AuthModule } from '../auth/auth.module';
 
@@ -28,11 +30,13 @@ import { AuthModule } from '../auth/auth.module';
     BookingSubmitService,
     BookingDetailsService,
     BookingListService,
+    BookingNotificationService,
     BookingQuickBookService,
     BookingUpdateService,
     BookingCancelService,
     IdempotencyService,
     PhoneService,
+    VoucherService,
   ],
 })
 export class BookingModule {}
