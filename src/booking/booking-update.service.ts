@@ -16,19 +16,23 @@ export class BookingUpdateService {
       hostPhoneNumber?: string;
       caddieArrangement?: 'none' | 'shared' | 'per_player';
       buggyType?: 'jumbo' | 'normal';
+      buggyQuantity?: number;
       buggySharingPreference?: 'shared' | 'mixed' | 'single';
       playerDetails?: Array<{
         name: string;
         phoneNumber: string;
-        category: 'normal' | 'senior';
+        category: 'adult' | 'normal' | 'senior' | 'junior';
         isHost: boolean;
       }>;
     },
     userId: string,
   ) {
-    const aggregate = await this.bookingService.getBookingAggregateByRef(bookingRef);
+    const aggregate =
+      await this.bookingService.getBookingAggregateByRef(bookingRef);
     this.bookingService.assertBookingOwnedByUser(aggregate.booking, userId);
-    const currentConfig = this.bookingService.extractBookingConfig(aggregate.lineItems);
+    const currentConfig = this.bookingService.extractBookingConfig(
+      aggregate.lineItems,
+    );
 
     if (input.hostName && aggregate.booking.user_id) {
       await this.bookingService.updateAppUser(aggregate.booking.user_id, {
@@ -50,7 +54,9 @@ export class BookingUpdateService {
         aggregate.booking.booking_id,
         input.playerDetails.map((player) => ({
           name: player.name,
-          phone_number: this.phoneService.normalizePhoneNumber(player.phoneNumber),
+          phone_number: this.phoneService.normalizePhoneNumber(
+            player.phoneNumber,
+          ),
           category: player.category,
         })),
       );
@@ -59,6 +65,7 @@ export class BookingUpdateService {
     if (
       input.caddieArrangement !== undefined ||
       input.buggyType !== undefined ||
+      input.buggyQuantity !== undefined ||
       input.buggySharingPreference !== undefined
     ) {
       await this.bookingService.updateBookingConfig(

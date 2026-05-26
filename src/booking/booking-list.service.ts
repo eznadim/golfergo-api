@@ -25,14 +25,20 @@ export class BookingListService {
     mode: 'upcoming' | 'past',
     pagination: { userId: string; page: number; pageSize: number },
   ) {
-    const bookings = await this.bookingService.getBookingRowsForUser(pagination.userId);
+    const bookings = await this.bookingService.getBookingRowsForUser(
+      pagination.userId,
+    );
     const aggregates = await Promise.all(
-      bookings.map((booking) => this.bookingService.buildBookingAggregate(booking)),
+      bookings.map((booking) =>
+        this.bookingService.buildBookingAggregate(booking),
+      ),
     );
 
     const now = Date.now();
     const filtered = aggregates.filter((aggregate) => {
-      if (this.bookingService.getDisplayStatus(aggregate.booking) === 'expired') {
+      if (
+        this.bookingService.getDisplayStatus(aggregate.booking) === 'expired'
+      ) {
         return false;
       }
 
@@ -55,13 +61,18 @@ export class BookingListService {
         return {
           bookingRef: aggregate.booking.booking_ref,
           status: this.bookingService.getDisplayStatus(aggregate.booking),
-          golfClubName: aggregate.facility?.facility_name ?? aggregate.organization.name,
+          golfClubName:
+            aggregate.facility?.facility_name ?? aggregate.organization.name,
           bookingDate: this.bookingService.extractDate(aggregate.slot.start_at),
-          teeTimeSlot: this.bookingService.formatTeeTime(aggregate.slot.start_at),
+          teeTimeSlot: this.bookingService.formatTeeTime(
+            aggregate.slot.start_at,
+          ),
           playType: config.playType,
-          selectedNine: config.selectedNine,
+          selectedNine: null,
           playerCount: config.playerCount,
-          grandTotal: this.bookingService.toNumber(aggregate.booking.total_amount),
+          grandTotal: this.bookingService.toNumber(
+            aggregate.booking.total_amount,
+          ),
           currency: 'MYR',
           paymentMethod: config.paymentMethod,
         };
