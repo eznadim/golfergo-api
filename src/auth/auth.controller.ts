@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Patch,
   Post,
   Req,
   UseGuards,
@@ -67,6 +68,28 @@ const RefreshSessionSchema = z.object({
   refreshToken: z.string().trim().min(1),
 });
 
+const UpdateCurrentUserSchema = z
+  .object({
+    name: z.string().trim().min(1).optional(),
+    email: z.string().trim().email().nullable().optional(),
+    dateOfBirth: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .nullable()
+      .optional(),
+    username: z.string().trim().min(1).nullable().optional(),
+  })
+  .refine(
+    (value) =>
+      value.name !== undefined ||
+      value.email !== undefined ||
+      value.dateOfBirth !== undefined ||
+      value.username !== undefined,
+    {
+      message: 'At least one profile field is required',
+    },
+  );
+
 const ProfileImageUploadUrlSchema = z.object({
   fileName: z.string().trim().min(1),
   contentType: z.string().trim().min(1).optional(),
@@ -105,6 +128,19 @@ export class AuthController {
   @UseGuards(AppAuthGuard)
   getCurrentUser(@Req() req: { appUser?: { sub: string } }) {
     return this.authService.getCurrentUser(req.appUser?.sub ?? '');
+  }
+
+  @Patch('me')
+  @UseGuards(AppAuthGuard)
+  updateCurrentUser(
+    @Req() req: { appUser?: { sub: string } },
+    @Body() body: unknown,
+  ) {
+    const data = UpdateCurrentUserSchema.parse(body);
+    return this.authService.updateCurrentUserProfile(
+      req.appUser?.sub ?? '',
+      data,
+    );
   }
 
   @Post('me/profile-image/upload-url')
