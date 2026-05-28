@@ -47,6 +47,7 @@ type AppUserBaseRow = {
   user_id: string;
   auth_id: string | null;
   name: string | null;
+  email: string | null;
   username: string | null;
   password_hash: string | null;
   pin_hash: string | null;
@@ -61,6 +62,7 @@ type AppUserBaseRow = {
   pin_locked_until: string | null;
   created_at: string | null;
   updated_at: string | null;
+  date_of_birth: string | null;
   profile_image_bucket: string | null;
   profile_image_path: string | null;
   profile_image_updated_at: string | null;
@@ -775,6 +777,52 @@ export class AuthService {
   async getCurrentUser(userId: string) {
     const user = await this.findUserById(userId);
     return this.mapUser(user);
+  }
+
+  async updateCurrentUserProfile(
+    userId: string,
+    input: {
+      name?: string;
+      email?: string | null;
+      dateOfBirth?: string | null;
+      username?: string | null;
+    },
+  ) {
+    await this.findUserById(userId);
+    const patch: Record<string, unknown> = {
+      updated_at: new Date().toISOString(),
+    };
+
+    if (input.name !== undefined) {
+      patch.name = input.name.trim();
+    }
+
+    if (input.email !== undefined) {
+      const email = input.email?.trim() ?? '';
+      patch.email = email || null;
+    }
+
+    if (input.dateOfBirth !== undefined) {
+      patch.date_of_birth = input.dateOfBirth;
+    }
+
+    if (input.username !== undefined) {
+      const username = input.username?.trim() ?? '';
+      patch.username = username || null;
+    }
+
+    const updated = await this.supabase.client
+      .from('app_user')
+      .update(patch)
+      .eq('user_id', userId)
+      .select(this.appUserSelect())
+      .single<AppUserBaseRow>();
+
+    if (updated.error) {
+      throw new BadRequestException(updated.error.message);
+    }
+
+    return this.mapUser(await this.attachRole(updated.data));
   }
 
   async createProfileImageUploadUrl(
@@ -1604,6 +1652,8 @@ export class AuthService {
       userId: user.user_id,
       authId: user.auth_id,
       name: user.name ?? '',
+      email: user.email ?? '',
+      dateOfBirth: user.date_of_birth,
       username: user.username ?? '',
       phoneNumber: user.phone_normalized ?? user.phone ?? '',
       roleId,
@@ -1695,7 +1745,7 @@ export class AuthService {
   }
 
   private appUserSelect() {
-    return 'user_id, auth_id, name, username, password_hash, pin_hash, phone, phone_normalized, is_phone_verified, phone_verified_at, account_status, preferred_auth_method, last_login_at, pin_failed_attempts, pin_locked_until, created_at, updated_at, profile_image_bucket, profile_image_path, profile_image_updated_at';
+    return 'user_id, auth_id, name, email, username, password_hash, pin_hash, phone, phone_normalized, is_phone_verified, phone_verified_at, account_status, preferred_auth_method, last_login_at, pin_failed_attempts, pin_locked_until, created_at, updated_at, date_of_birth, profile_image_bucket, profile_image_path, profile_image_updated_at';
   }
 
   private otpSelect() {
