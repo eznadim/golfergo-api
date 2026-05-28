@@ -6,8 +6,10 @@ export class BookingClubService {
   constructor(private readonly bookingService: BookingService) {}
 
   fetchGolfClubs(golfClubSlug?: string) {
-    if (golfClubSlug) {
-      return this.bookingService.fetchGolfClubDetails(golfClubSlug);
+    const normalizedSlug = golfClubSlug?.trim();
+
+    if (normalizedSlug) {
+      return this.bookingService.fetchGolfClubDetails(normalizedSlug);
     }
 
     return this.bookingService.fetchGolfClubList();

@@ -272,7 +272,6 @@ export class BookingAdminService {
       club: {
         slug: selectedClub.slug,
         name: selectedClub.name,
-        supportsNineHoles: selectedClub.supportsNineHoles,
       },
       bookingDate: input.bookingDate,
       summary: {

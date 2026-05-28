@@ -37,6 +37,9 @@ const PIN_LOCK_MINUTES = 15;
 const PIN_HISTORY_LIMIT = 5;
 const ACCESS_TOKEN_TTL_SECONDS = 15 * 60;
 const REFRESH_TOKEN_TTL_DAYS = 30;
+const USER_PROFILE_IMAGE_BUCKET = 'user-profile-images';
+const USER_PROFILE_IMAGE_SIGNED_URL_SECONDS = 60 * 60;
+const USER_PROFILE_IMAGE_UPLOAD_URL_SECONDS = 10 * 60;
 
 type OtpPurpose = 'register' | 'login_fallback' | 'pin_reset';
 
@@ -58,6 +61,9 @@ type AppUserBaseRow = {
   pin_locked_until: string | null;
   created_at: string | null;
   updated_at: string | null;
+  profile_image_bucket: string | null;
+  profile_image_path: string | null;
+  profile_image_updated_at: string | null;
 };
 
 type AppUserRow = AppUserBaseRow & {
@@ -131,16 +137,21 @@ export class AuthService {
     private readonly config: ConfigService,
   ) {}
 
-  async sendOtp(input: {
-    name?: string;
-    phoneNumber: string;
-    purpose: OtpPurpose;
-    visitorId?: string;
-    channel?: 'whatsapp';
-    captchaToken?: string;
-  }, context: AuthContext = {}) {
+  async sendOtp(
+    input: {
+      name?: string;
+      phoneNumber: string;
+      purpose: OtpPurpose;
+      visitorId?: string;
+      channel?: 'whatsapp';
+      captchaToken?: string;
+    },
+    context: AuthContext = {},
+  ) {
     const normalizedPhoneNumber = this.normalizePhoneNumber(input.phoneNumber);
-    const existingUser = await this.findUserByPhoneNumber(normalizedPhoneNumber);
+    const existingUser = await this.findUserByPhoneNumber(
+      normalizedPhoneNumber,
+    );
 
     if (input.purpose === 'register' && existingUser?.pin_hash) {
       throw new ConflictException(
@@ -215,13 +226,16 @@ export class AuthService {
     };
   }
 
-  async verifyOtp(input: {
-    name?: string;
-    phoneNumber: string;
-    purpose: OtpPurpose;
-    otpCode: string;
-    visitorId?: string;
-  }, context: AuthContext = {}) {
+  async verifyOtp(
+    input: {
+      name?: string;
+      phoneNumber: string;
+      purpose: OtpPurpose;
+      otpCode: string;
+      visitorId?: string;
+    },
+    context: AuthContext = {},
+  ) {
     const normalizedPhoneNumber = this.normalizePhoneNumber(input.phoneNumber);
     const otpRequest = await this.getLatestOtpRequest(
       normalizedPhoneNumber,
@@ -263,7 +277,7 @@ export class AuthService {
         code: 'PHONE_VERIFIED_PIN_REQUIRED',
         message: 'Phone verified. Create a 6-digit app PIN.',
         data: {
-          user: this.mapUser(user),
+          user: await this.mapUser(user),
           nextAction: 'PIN_SETUP_REQUIRED',
           pinSetupToken: await this.signPinSetupToken(user),
         },
@@ -284,7 +298,7 @@ export class AuthService {
         code: 'PIN_RESET_VERIFIED',
         message: 'OTP verified. Create a new 6-digit app PIN.',
         data: {
-          user: this.mapUser(user),
+          user: await this.mapUser(user),
           nextAction: 'PIN_RESET_REQUIRED',
           pinSetupToken: await this.signPinSetupToken(user),
         },
@@ -302,20 +316,26 @@ export class AuthService {
         accessToken: session.accessToken,
         refreshToken: session.refreshToken,
         session,
-        user: this.mapUser(activeUser),
+        user: await this.mapUser(activeUser),
         nextAction: 'OPTIONAL_PASSKEY_ENROLL',
       },
     };
   }
 
-  async setupPin(input: {
-    pinSetupToken: string;
-    pin: string;
-    confirmPin: string;
-  }, context: AuthContext = {}) {
+  async setupPin(
+    input: {
+      pinSetupToken: string;
+      pin: string;
+      confirmPin: string;
+    },
+    context: AuthContext = {},
+  ) {
     if (input.pin !== input.confirmPin) {
       throw new BadRequestException(
-        this.errorPayload('PIN_CONFIRMATION_MISMATCH', 'PIN confirmation does not match.'),
+        this.errorPayload(
+          'PIN_CONFIRMATION_MISMATCH',
+          'PIN confirmation does not match.',
+        ),
       );
     }
 
@@ -328,10 +348,9 @@ export class AuthService {
     const userId = await this.verifyPinSetupToken(input.pinSetupToken);
     const user = await this.findUserById(userId);
 
-    const phoneSuffix = (user.phone_normalized ?? user.phone ?? '').replace(
-      /[^\d]/g,
-      '',
-    ).slice(-6);
+    const phoneSuffix = (user.phone_normalized ?? user.phone ?? '')
+      .replace(/[^\d]/g, '')
+      .slice(-6);
     if (phoneSuffix && input.pin === phoneSuffix) {
       throw new BadRequestException(
         this.errorPayload(
@@ -371,7 +390,7 @@ export class AuthService {
       accessToken: session.accessToken,
       refreshToken: session.refreshToken,
       session,
-      user: this.mapUser(activeUser),
+      user: await this.mapUser(activeUser),
       nextAction: 'OPTIONAL_PASSKEY_ENROLL',
     };
   }
@@ -408,7 +427,10 @@ export class AuthService {
     };
   }
 
-  async loginWithPin(input: { phoneNumber: string; pin: string }, context: AuthContext = {}) {
+  async loginWithPin(
+    input: { phoneNumber: string; pin: string },
+    context: AuthContext = {},
+  ) {
     const normalizedPhoneNumber = this.normalizePhoneNumber(input.phoneNumber);
     const user = await this.findUserByPhoneNumber(normalizedPhoneNumber);
 
@@ -423,15 +445,19 @@ export class AuthService {
       new Date(user.pin_locked_until).getTime() > Date.now()
     ) {
       throw new UnauthorizedException(
-        this.errorPayload('PIN_LOCKED', 'Too many failed attempts. Try again later.', {
-          lockedUntil: user.pin_locked_until,
-          retryAfterSeconds: Math.max(
-            1,
-            Math.ceil(
-              (new Date(user.pin_locked_until).getTime() - Date.now()) / 1000,
+        this.errorPayload(
+          'PIN_LOCKED',
+          'Too many failed attempts. Try again later.',
+          {
+            lockedUntil: user.pin_locked_until,
+            retryAfterSeconds: Math.max(
+              1,
+              Math.ceil(
+                (new Date(user.pin_locked_until).getTime() - Date.now()) / 1000,
+              ),
             ),
-          ),
-        }),
+          },
+        ),
       );
     }
 
@@ -469,7 +495,7 @@ export class AuthService {
       accessToken: session.accessToken,
       refreshToken: session.refreshToken,
       session,
-      user: this.mapUser(activeUser),
+      user: await this.mapUser(activeUser),
     };
   }
 
@@ -516,7 +542,9 @@ export class AuthService {
 
   async getPasskeyLoginOptions(input: { phoneNumber?: string | null }) {
     const user = input.phoneNumber
-      ? await this.findUserByPhoneNumber(this.normalizePhoneNumber(input.phoneNumber))
+      ? await this.findUserByPhoneNumber(
+          this.normalizePhoneNumber(input.phoneNumber),
+        )
       : null;
     const credentials = user ? await this.getUserPasskeys(user.user_id) : [];
     const publicKey = await generateAuthenticationOptions({
@@ -576,7 +604,9 @@ export class AuthService {
       });
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : 'Passkey registration verification failed.';
+        error instanceof Error
+          ? error.message
+          : 'Passkey registration verification failed.';
       console.warn('Passkey registration verification failed', {
         message,
         expectedRPID: challenge.rp_id,
@@ -593,7 +623,10 @@ export class AuthService {
 
     if (!verification.verified || !verification.registrationInfo) {
       throw new UnauthorizedException(
-        this.errorPayload('PASSKEY_REGISTRATION_FAILED', 'Passkey registration failed.'),
+        this.errorPayload(
+          'PASSKEY_REGISTRATION_FAILED',
+          'Passkey registration failed.',
+        ),
       );
     }
 
@@ -604,14 +637,17 @@ export class AuthService {
         passkey_id: randomUUID(),
         user_id: user.user_id,
         credential_id: registrationInfo.credential.id,
-        public_key: this.base64Url(Buffer.from(registrationInfo.credential.publicKey)),
+        public_key: this.base64Url(
+          Buffer.from(registrationInfo.credential.publicKey),
+        ),
         sign_count: registrationInfo.credential.counter,
         transports: input.credential.response.transports ?? null,
         device_label: input.deviceLabel ?? null,
         platform: input.platform ?? null,
         aaguid: registrationInfo.aaguid,
         is_discoverable: true,
-        is_backup_eligible: registrationInfo.credentialDeviceType === 'multiDevice',
+        is_backup_eligible:
+          registrationInfo.credentialDeviceType === 'multiDevice',
         is_backed_up: registrationInfo.credentialBackedUp,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
@@ -657,7 +693,9 @@ export class AuthService {
     },
     context: AuthContext = {},
   ) {
-    const credential = await this.findPasskeyByCredentialId(input.credential.id);
+    const credential = await this.findPasskeyByCredentialId(
+      input.credential.id,
+    );
     const challenge = await this.getPasskeyChallenge(
       input.challengeId,
       'authenticate',
@@ -665,7 +703,10 @@ export class AuthService {
     );
     if (challenge.user_id && challenge.user_id !== credential.user_id) {
       throw new UnauthorizedException(
-        this.errorPayload('PASSKEY_CHALLENGE_INVALID', 'Passkey challenge is invalid.'),
+        this.errorPayload(
+          'PASSKEY_CHALLENGE_INVALID',
+          'Passkey challenge is invalid.',
+        ),
       );
     }
 
@@ -681,7 +722,9 @@ export class AuthService {
       });
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : 'Passkey login verification failed.';
+        error instanceof Error
+          ? error.message
+          : 'Passkey login verification failed.';
       console.warn('Passkey login verification failed', {
         message,
         expectedRPID: challenge.rp_id,
@@ -712,15 +755,20 @@ export class AuthService {
 
     const activeUser = await this.markLoginSuccess(credential.user_id);
     const session = await this.createSession(activeUser, context);
-    await this.writeAuditLog(activeUser.user_id, 'passkey_login_success', context, {
-      passkeyId: credential.passkey_id,
-    });
+    await this.writeAuditLog(
+      activeUser.user_id,
+      'passkey_login_success',
+      context,
+      {
+        passkeyId: credential.passkey_id,
+      },
+    );
 
     return {
       accessToken: session.accessToken,
       refreshToken: session.refreshToken,
       session,
-      user: this.mapUser(activeUser),
+      user: await this.mapUser(activeUser),
     };
   }
 
@@ -729,7 +777,106 @@ export class AuthService {
     return this.mapUser(user);
   }
 
-  async refreshSession(input: { refreshToken: string }, context: AuthContext = {}) {
+  async createProfileImageUploadUrl(
+    userId: string,
+    input: { fileName: string; contentType?: string },
+  ) {
+    await this.findUserById(userId);
+    const extension = this.getProfileImageExtension(
+      input.fileName,
+      input.contentType,
+    );
+    const path = `users/${userId}/avatar-${Date.now()}.${extension}`;
+    const bucket = USER_PROFILE_IMAGE_BUCKET;
+    const storage = this.supabase.client.storage.from(bucket);
+    const result = await (storage as any).createSignedUploadUrl(path, {
+      upsert: true,
+    });
+
+    if (result.error) {
+      throw new BadRequestException(result.error.message);
+    }
+
+    return {
+      bucket,
+      path,
+      uploadUrl: result.data.signedUrl,
+      token: result.data.token,
+      expiresInSeconds: USER_PROFILE_IMAGE_UPLOAD_URL_SECONDS,
+    };
+  }
+
+  async updateProfileImage(
+    userId: string,
+    input: { bucket?: string; path: string },
+  ) {
+    const bucket = input.bucket?.trim() || USER_PROFILE_IMAGE_BUCKET;
+    if (bucket !== USER_PROFILE_IMAGE_BUCKET) {
+      throw new BadRequestException('Invalid profile image bucket');
+    }
+
+    if (!input.path.startsWith(`users/${userId}/`)) {
+      throw new BadRequestException('Invalid profile image path');
+    }
+
+    const currentUser = await this.findUserById(userId);
+    const now = new Date().toISOString();
+    const updated = await this.supabase.client
+      .from('app_user')
+      .update({
+        profile_image_bucket: bucket,
+        profile_image_path: input.path,
+        profile_image_updated_at: now,
+        updated_at: now,
+      })
+      .eq('user_id', userId)
+      .select(this.appUserSelect())
+      .single<AppUserBaseRow>();
+
+    if (updated.error) {
+      throw new BadRequestException(updated.error.message);
+    }
+
+    await this.removeProfileImageObject(
+      currentUser.profile_image_bucket,
+      currentUser.profile_image_path,
+      input.path,
+    );
+
+    return this.mapUser(await this.attachRole(updated.data));
+  }
+
+  async deleteProfileImage(userId: string) {
+    const currentUser = await this.findUserById(userId);
+    const now = new Date().toISOString();
+    const updated = await this.supabase.client
+      .from('app_user')
+      .update({
+        profile_image_bucket: null,
+        profile_image_path: null,
+        profile_image_updated_at: null,
+        updated_at: now,
+      })
+      .eq('user_id', userId)
+      .select(this.appUserSelect())
+      .single<AppUserBaseRow>();
+
+    if (updated.error) {
+      throw new BadRequestException(updated.error.message);
+    }
+
+    await this.removeProfileImageObject(
+      currentUser.profile_image_bucket,
+      currentUser.profile_image_path,
+    );
+
+    return this.mapUser(await this.attachRole(updated.data));
+  }
+
+  async refreshSession(
+    input: { refreshToken: string },
+    context: AuthContext = {},
+  ) {
     const refreshTokenHash = this.hashRefreshToken(input.refreshToken);
     const result = await this.supabase.client
       .from('auth_session')
@@ -747,7 +894,10 @@ export class AuthService {
       new Date(result.data.expires_at).getTime() < Date.now()
     ) {
       throw new UnauthorizedException(
-        this.errorPayload('INVALID_REFRESH_TOKEN', 'Invalid or expired refresh token.'),
+        this.errorPayload(
+          'INVALID_REFRESH_TOKEN',
+          'Invalid or expired refresh token.',
+        ),
       );
     }
 
@@ -760,7 +910,7 @@ export class AuthService {
       accessToken: session.accessToken,
       refreshToken: session.refreshToken,
       session,
-      user: this.mapUser(user),
+      user: await this.mapUser(user),
     };
   }
 
@@ -993,7 +1143,9 @@ export class AuthService {
       )
       .eq('challenge_id', challengeId)
       .eq('purpose', purpose);
-    const result = userId ? await query.eq('user_id', userId).maybeSingle<PasskeyChallengeRow>() : await query.maybeSingle<PasskeyChallengeRow>();
+    const result = userId
+      ? await query.eq('user_id', userId).maybeSingle<PasskeyChallengeRow>()
+      : await query.maybeSingle<PasskeyChallengeRow>();
 
     if (result.error) {
       throw new BadRequestException(result.error.message);
@@ -1001,13 +1153,19 @@ export class AuthService {
 
     if (!result.data || result.data.consumed_at) {
       throw new UnauthorizedException(
-        this.errorPayload('PASSKEY_CHALLENGE_INVALID', 'Passkey challenge is invalid.'),
+        this.errorPayload(
+          'PASSKEY_CHALLENGE_INVALID',
+          'Passkey challenge is invalid.',
+        ),
       );
     }
 
     if (new Date(result.data.expires_at).getTime() < Date.now()) {
       throw new UnauthorizedException(
-        this.errorPayload('PASSKEY_CHALLENGE_EXPIRED', 'Passkey challenge has expired.'),
+        this.errorPayload(
+          'PASSKEY_CHALLENGE_EXPIRED',
+          'Passkey challenge has expired.',
+        ),
       );
     }
 
@@ -1025,7 +1183,10 @@ export class AuthService {
     }
   }
 
-  private async ensureOtpCooldown(phoneNormalized: string, purpose: OtpPurpose) {
+  private async ensureOtpCooldown(
+    phoneNormalized: string,
+    purpose: OtpPurpose,
+  ) {
     const cooldownStartedAt = new Date(
       Date.now() - OTP_RESEND_COOLDOWN_SECONDS * 1000,
     ).toISOString();
@@ -1091,13 +1252,19 @@ export class AuthService {
   private assertOtpRequestCanBeVerified(otpRequest: OtpRequestRow) {
     if (new Date(otpRequest.expires_at).getTime() < Date.now()) {
       throw new UnauthorizedException(
-        this.errorPayload('OTP_EXPIRED', 'OTP code has expired. Request a new code.'),
+        this.errorPayload(
+          'OTP_EXPIRED',
+          'OTP code has expired. Request a new code.',
+        ),
       );
     }
 
     if (otpRequest.attempts >= otpRequest.max_attempts) {
       throw new UnauthorizedException(
-        this.errorPayload('OTP_ATTEMPTS_EXCEEDED', 'Too many OTP attempts. Request a new code.'),
+        this.errorPayload(
+          'OTP_ATTEMPTS_EXCEEDED',
+          'Too many OTP attempts. Request a new code.',
+        ),
       );
     }
   }
@@ -1109,7 +1276,10 @@ export class AuthService {
       .update({ attempts: nextAttempts })
       .eq('otp_request_id', otpRequest.otp_request_id);
 
-    const attemptsRemaining = Math.max(otpRequest.max_attempts - nextAttempts, 0);
+    const attemptsRemaining = Math.max(
+      otpRequest.max_attempts - nextAttempts,
+      0,
+    );
     throw new UnauthorizedException(
       this.errorPayload('INVALID_OTP', 'Invalid OTP code.', {
         attemptsRemaining,
@@ -1427,7 +1597,7 @@ export class AuthService {
     }
   }
 
-  private mapUser(user: AppUserRow) {
+  private async mapUser(user: AppUserRow) {
     const roleId = user.role_id ?? null;
 
     return {
@@ -1443,9 +1613,74 @@ export class AuthService {
       preferredAuthMethod: user.preferred_auth_method ?? 'pin',
       hasPin: Boolean(user.pin_hash),
       hasPasskey: (user.passkey_count ?? 0) > 0,
+      profileImage: await this.buildProfileImage(user),
       createdAt: user.created_at,
       updatedAt: user.updated_at,
     };
+  }
+
+  private async buildProfileImage(user: AppUserRow) {
+    if (!user.profile_image_bucket || !user.profile_image_path) {
+      return null;
+    }
+
+    const signedUrl = await this.supabase.client.storage
+      .from(user.profile_image_bucket)
+      .createSignedUrl(
+        user.profile_image_path,
+        USER_PROFILE_IMAGE_SIGNED_URL_SECONDS,
+      );
+
+    if (signedUrl.error) {
+      throw new BadRequestException(signedUrl.error.message);
+    }
+
+    return {
+      url: signedUrl.data.signedUrl,
+      bucket: user.profile_image_bucket,
+      path: user.profile_image_path,
+      updatedAt: user.profile_image_updated_at,
+    };
+  }
+
+  private getProfileImageExtension(fileName: string, contentType?: string) {
+    const normalizedContentType = contentType?.toLowerCase().trim();
+    const extensionFromContentType =
+      normalizedContentType === 'image/jpeg'
+        ? 'jpg'
+        : normalizedContentType === 'image/png'
+          ? 'png'
+          : normalizedContentType === 'image/webp'
+            ? 'webp'
+            : null;
+
+    if (extensionFromContentType) {
+      return extensionFromContentType;
+    }
+
+    const extension = fileName.split('.').pop()?.toLowerCase();
+    if (extension === 'jpg' || extension === 'jpeg') {
+      return 'jpg';
+    }
+    if (extension === 'png' || extension === 'webp') {
+      return extension;
+    }
+
+    throw new BadRequestException(
+      'Profile image must be a JPG, PNG, or WEBP file',
+    );
+  }
+
+  private async removeProfileImageObject(
+    bucket: string | null,
+    path: string | null,
+    nextPath?: string,
+  ) {
+    if (!bucket || !path || path === nextPath) {
+      return;
+    }
+
+    await this.supabase.client.storage.from(bucket).remove([path]);
   }
 
   private getRoleName(roleId: number | null) {
@@ -1460,7 +1695,7 @@ export class AuthService {
   }
 
   private appUserSelect() {
-    return 'user_id, auth_id, name, username, password_hash, pin_hash, phone, phone_normalized, is_phone_verified, phone_verified_at, account_status, preferred_auth_method, last_login_at, pin_failed_attempts, pin_locked_until, created_at, updated_at';
+    return 'user_id, auth_id, name, username, password_hash, pin_hash, phone, phone_normalized, is_phone_verified, phone_verified_at, account_status, preferred_auth_method, last_login_at, pin_failed_attempts, pin_locked_until, created_at, updated_at, profile_image_bucket, profile_image_path, profile_image_updated_at';
   }
 
   private otpSelect() {
@@ -1581,7 +1816,10 @@ export class AuthService {
 
     if (!secret || !captchaToken) {
       throw new BadRequestException(
-        this.errorPayload('CAPTCHA_REQUIRED', 'Captcha verification is required.'),
+        this.errorPayload(
+          'CAPTCHA_REQUIRED',
+          'Captcha verification is required.',
+        ),
       );
     }
 
