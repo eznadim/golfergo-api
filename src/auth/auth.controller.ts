@@ -1,4 +1,12 @@
-import { Body, Controller, Get, Post, Req, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Post,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
 import { z } from 'zod';
 import { AppAuthGuard } from './app-auth.guard';
 import { AuthService } from './auth.service';
@@ -59,6 +67,16 @@ const RefreshSessionSchema = z.object({
   refreshToken: z.string().trim().min(1),
 });
 
+const ProfileImageUploadUrlSchema = z.object({
+  fileName: z.string().trim().min(1),
+  contentType: z.string().trim().min(1).optional(),
+});
+
+const ProfileImageUpdateSchema = z.object({
+  bucket: z.string().trim().min(1).optional(),
+  path: z.string().trim().min(1),
+});
+
 function getAuthContext(req: {
   ip?: string;
   headers?: Record<string, string | string[] | undefined>;
@@ -89,20 +107,76 @@ export class AuthController {
     return this.authService.getCurrentUser(req.appUser?.sub ?? '');
   }
 
+  @Post('me/profile-image/upload-url')
+  @UseGuards(AppAuthGuard)
+  createProfileImageUploadUrl(
+    @Req() req: { appUser?: { sub: string } },
+    @Body() body: unknown,
+  ) {
+    const data = ProfileImageUploadUrlSchema.parse(body);
+    return this.authService.createProfileImageUploadUrl(
+      req.appUser?.sub ?? '',
+      data,
+    );
+  }
+
+  @Post('me/profile-image')
+  @UseGuards(AppAuthGuard)
+  updateProfileImage(
+    @Req() req: { appUser?: { sub: string } },
+    @Body() body: unknown,
+  ) {
+    const data = ProfileImageUpdateSchema.parse(body);
+    return this.authService.updateProfileImage(req.appUser?.sub ?? '', data);
+  }
+
+  @Post('me/profile-image/delete')
+  @UseGuards(AppAuthGuard)
+  deleteProfileImage(@Req() req: { appUser?: { sub: string } }) {
+    return this.authService.deleteProfileImage(req.appUser?.sub ?? '');
+  }
+
+  @Delete('me/profile-image')
+  @UseGuards(AppAuthGuard)
+  deleteProfileImageRest(@Req() req: { appUser?: { sub: string } }) {
+    return this.authService.deleteProfileImage(req.appUser?.sub ?? '');
+  }
+
   @Post('otp/send')
-  sendOtp(@Body() body: unknown, @Req() req: { ip?: string; headers?: Record<string, string | string[] | undefined> }) {
+  sendOtp(
+    @Body() body: unknown,
+    @Req()
+    req: {
+      ip?: string;
+      headers?: Record<string, string | string[] | undefined>;
+    },
+  ) {
     const data = SendOtpSchema.parse(body);
     return this.authService.sendOtp(data, getAuthContext(req));
   }
 
   @Post('otp/verify')
-  verifyOtp(@Body() body: unknown, @Req() req: { ip?: string; headers?: Record<string, string | string[] | undefined> }) {
+  verifyOtp(
+    @Body() body: unknown,
+    @Req()
+    req: {
+      ip?: string;
+      headers?: Record<string, string | string[] | undefined>;
+    },
+  ) {
     const data = VerifyOtpSchema.parse(body);
     return this.authService.verifyOtp(data, getAuthContext(req));
   }
 
   @Post('pin/setup')
-  setupPin(@Body() body: unknown, @Req() req: { ip?: string; headers?: Record<string, string | string[] | undefined> }) {
+  setupPin(
+    @Body() body: unknown,
+    @Req()
+    req: {
+      ip?: string;
+      headers?: Record<string, string | string[] | undefined>;
+    },
+  ) {
     const data = PinSetupSchema.parse(body);
     return this.authService.setupPin(data, getAuthContext(req));
   }
@@ -114,7 +188,14 @@ export class AuthController {
   }
 
   @Post('login/pin')
-  loginWithPin(@Body() body: unknown, @Req() req: { ip?: string; headers?: Record<string, string | string[] | undefined> }) {
+  loginWithPin(
+    @Body() body: unknown,
+    @Req()
+    req: {
+      ip?: string;
+      headers?: Record<string, string | string[] | undefined>;
+    },
+  ) {
     const data = PinLoginSchema.parse(body);
     return this.authService.loginWithPin(data, getAuthContext(req));
   }
@@ -135,7 +216,12 @@ export class AuthController {
   @Post('passkeys/register/verify')
   @UseGuards(AppAuthGuard)
   verifyPasskeyRegistration(
-    @Req() req: { appUser?: { sub: string }; ip?: string; headers?: Record<string, string | string[] | undefined> },
+    @Req()
+    req: {
+      appUser?: { sub: string };
+      ip?: string;
+      headers?: Record<string, string | string[] | undefined>;
+    },
     @Body() body: unknown,
   ) {
     const data = PasskeyRegisterVerifySchema.parse(body);
@@ -154,7 +240,11 @@ export class AuthController {
 
   @Post('passkeys/login/verify')
   verifyPasskeyLogin(
-    @Req() req: { ip?: string; headers?: Record<string, string | string[] | undefined> },
+    @Req()
+    req: {
+      ip?: string;
+      headers?: Record<string, string | string[] | undefined>;
+    },
     @Body() body: unknown,
   ) {
     const data = PasskeyLoginVerifySchema.parse(body);
@@ -163,7 +253,11 @@ export class AuthController {
 
   @Post('session/refresh')
   refreshSession(
-    @Req() req: { ip?: string; headers?: Record<string, string | string[] | undefined> },
+    @Req()
+    req: {
+      ip?: string;
+      headers?: Record<string, string | string[] | undefined>;
+    },
     @Body() body: unknown,
   ) {
     const data = RefreshSessionSchema.parse(body);
@@ -173,7 +267,12 @@ export class AuthController {
   @Post('logout')
   @UseGuards(AppAuthGuard)
   logout(
-    @Req() req: { appUser?: { sub: string; sid?: string }; ip?: string; headers?: Record<string, string | string[] | undefined> },
+    @Req()
+    req: {
+      appUser?: { sub: string; sid?: string };
+      ip?: string;
+      headers?: Record<string, string | string[] | undefined>;
+    },
   ) {
     return this.authService.logout(
       req.appUser?.sid ?? '',

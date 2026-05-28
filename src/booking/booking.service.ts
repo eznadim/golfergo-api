@@ -107,6 +107,36 @@ type OrganizationRow = {
   created_at: string | null;
 };
 
+type OrganizationMediaRow = {
+  organization_media_id: string;
+  organization_id: string;
+  media_type: string;
+  bucket_id: string;
+  object_path: string;
+  alt_text: string | null;
+  caption: string | null;
+  sort_order: number | string | null;
+  is_primary: boolean | null;
+  is_active: boolean | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+type GolfClubImage = {
+  url: string;
+  path: string;
+  altText: string;
+  caption?: string | null;
+  sortOrder?: number;
+};
+
+type GolfClubImages = {
+  logo: GolfClubImage | null;
+  cover: GolfClubImage | null;
+  thumbnail: GolfClubImage | null;
+  gallery: GolfClubImage[];
+};
+
 type OrganizationSportRow = {
   organization_sport_id: string;
   organization_id: string;
@@ -309,10 +339,9 @@ type GolfClubListItem = {
   latitude: number | null;
   longitude: number | null;
   noOfHoles: number;
-  supportsNineHoles: boolean;
-  supportedNines: string[];
   buggyPolicy: 'required';
   paymentMethods: Array<'pay_counter'>;
+  images: GolfClubImages;
   updatedAt: string;
 };
 
@@ -336,6 +365,9 @@ export class BookingService {
     const facilities = await this.getFacilitiesByOrganizationSportIds(
       organizationSports.map((item) => item.organization_sport_id),
     );
+    const mediaByOrganizationId = await this.getOrganizationMediaByIds(
+      organizations.map((item) => item.organization_id),
+    );
     const organizationSportByOrganizationId = new Map(
       organizationSports.map((item) => [item.organization_id, item]),
     );
@@ -357,6 +389,7 @@ export class BookingService {
         organization,
         organizationSport ?? null,
         facility,
+        mediaByOrganizationId.get(organization.organization_id) ?? [],
       );
     });
   }
@@ -373,10 +406,14 @@ export class BookingService {
           organizationSport.organization_sport_id,
         )
       : null;
+    const mediaRows = await this.getOrganizationMediaByOrganizationId(
+      organization.organization_id,
+    );
     const club = this.buildGolfClubSummaryFromRows(
       organization,
       organizationSport,
       facility,
+      mediaRows,
     );
 
     let nextAvailableSlot: Awaited<
@@ -414,7 +451,6 @@ export class BookingService {
       },
       bookingConfig: {
         supportedPlayTypes: ['18_holes'],
-        supportedNines: [],
         buggyPolicy: club.buggyPolicy,
         paymentMethods: club.paymentMethods,
       },
@@ -755,6 +791,42 @@ export class BookingService {
     );
   }
 
+  private async getOrganizationMediaByIds(organizationIds: string[]) {
+    if (organizationIds.length === 0) {
+      return new Map<string, OrganizationMediaRow[]>();
+    }
+
+    const result = await this.supabase.client
+      .from('organization_media')
+      .select(
+        'organization_media_id, organization_id, media_type, bucket_id, object_path, alt_text, caption, sort_order, is_primary, is_active, created_at, updated_at',
+      )
+      .in('organization_id', organizationIds)
+      .eq('is_active', true)
+      .order('sort_order', { ascending: true });
+
+    if (result.error) {
+      this.throwSupabaseError(result.error.message);
+    }
+
+    return ((result.data ?? []) as OrganizationMediaRow[]).reduce(
+      (grouped, item) => {
+        const rows = grouped.get(item.organization_id) ?? [];
+        rows.push(item);
+        grouped.set(item.organization_id, rows);
+        return grouped;
+      },
+      new Map<string, OrganizationMediaRow[]>(),
+    );
+  }
+
+  private async getOrganizationMediaByOrganizationId(organizationId: string) {
+    const mediaByOrganizationId = await this.getOrganizationMediaByIds([
+      organizationId,
+    ]);
+    return mediaByOrganizationId.get(organizationId) ?? [];
+  }
+
   private async getFacilitiesByOrganizationSportIds(
     organizationSportIds: string[],
   ) {
@@ -990,6 +1062,7 @@ export class BookingService {
       clubContext.organization,
       clubContext.organizationSport,
       clubContext.facility,
+      [],
     );
   }
 
@@ -997,9 +1070,11 @@ export class BookingService {
     organization: OrganizationRow,
     organizationSport: OrganizationSportRow | null,
     facility: FacilityRow | null,
+    mediaRows: OrganizationMediaRow[],
   ): GolfClubListItem {
     const hasBookingSetup = Boolean(organizationSport && facility);
-    const isBookable = hasBookingSetup && this.isBookableClub(organization.slug);
+    const isBookable =
+      hasBookingSetup && this.isBookableClub(organization.slug);
 
     return {
       id: facility?.facility_id ?? organization.organization_id,
@@ -1012,11 +1087,64 @@ export class BookingService {
       latitude: this.toNullableNumber(organization.latitude),
       longitude: this.toNullableNumber(organization.longitude),
       noOfHoles: this.toNumber(facility?.no_of_holes),
-      supportsNineHoles: false,
-      supportedNines: [],
       buggyPolicy: 'required',
       paymentMethods: ['pay_counter'],
+      images: this.buildGolfClubImages(organization, mediaRows),
       updatedAt: organization.created_at ?? new Date().toISOString(),
+    };
+  }
+
+  private buildGolfClubImages(
+    organization: OrganizationRow,
+    mediaRows: OrganizationMediaRow[],
+  ): GolfClubImages {
+    const rowsByType = mediaRows.reduce((grouped, row) => {
+      const type = row.media_type.toLowerCase();
+      const rows = grouped.get(type) ?? [];
+      rows.push(row);
+      grouped.set(type, rows);
+      return grouped;
+    }, new Map<string, OrganizationMediaRow[]>());
+
+    const pickImage = (type: string, fallbackLabel: string) => {
+      const rows = rowsByType.get(type) ?? [];
+      const row = rows.find((item) => item.is_primary) ?? rows[0];
+      return row
+        ? this.buildGolfClubImage(organization, row, fallbackLabel)
+        : null;
+    };
+
+    return {
+      logo: pickImage('logo', `${organization.name} logo`),
+      cover: pickImage('cover', `${organization.name} cover image`),
+      thumbnail: pickImage('thumbnail', `${organization.name} thumbnail`),
+      gallery: (rowsByType.get('gallery') ?? []).map((row, index) =>
+        this.buildGolfClubImage(
+          organization,
+          row,
+          `${organization.name} gallery image ${index + 1}`,
+          true,
+        ),
+      ),
+    };
+  }
+
+  private buildGolfClubImage(
+    organization: OrganizationRow,
+    mediaRow: OrganizationMediaRow,
+    fallbackAltText: string,
+    includeCaption = false,
+  ): GolfClubImage {
+    const publicUrl = this.supabase.client.storage
+      .from(mediaRow.bucket_id)
+      .getPublicUrl(mediaRow.object_path).data.publicUrl;
+
+    return {
+      url: publicUrl,
+      path: mediaRow.object_path,
+      altText: mediaRow.alt_text ?? fallbackAltText,
+      ...(includeCaption ? { caption: mediaRow.caption } : {}),
+      sortOrder: this.toNumber(mediaRow.sort_order),
     };
   }
 

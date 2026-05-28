@@ -146,8 +146,11 @@ export class BookingController {
   ) {}
 
   @Get('golf-clubs')
-  getGolfClubs(@Query('slug') golfClubSlug?: string) {
-    return this.bookingClubService.fetchGolfClubs(golfClubSlug);
+  getGolfClubs(
+    @Query('slug') slug?: string,
+    @Query('golfClubSlug') golfClubSlug?: string,
+  ) {
+    return this.bookingClubService.fetchGolfClubs(slug ?? golfClubSlug);
   }
 
   @Get('admin/slot-board')
