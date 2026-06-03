@@ -10,7 +10,7 @@ import { BookingModule } from './booking/booking.module';
 
 @Module({
   imports: [
-      ConfigModule.forRoot({ isGlobal: true }),
+    ConfigModule.forRoot({ isGlobal: true }),
     SupabaseModule,
     AuthModule,
     VisitorsModule,

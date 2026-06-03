@@ -2,9 +2,11 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
   Headers,
   Param,
+  Patch,
   Post,
   Put,
   Query,
@@ -87,6 +89,129 @@ const AdminSlotBoardSchema = z.object({
   bookingDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
 });
 
+const AdminDashboardSchema = z.object({
+  golfClubSlug: z.string().min(1).optional(),
+  bookingDate: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional(),
+});
+
+const AdminBookingListSchema = z.object({
+  golfClubSlug: z.string().min(1).optional(),
+  bookingDate: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional(),
+  status: z
+    .enum([
+      'held',
+      'pending_payment',
+      'confirmed',
+      'completed',
+      'no_show',
+      'cancelled',
+    ])
+    .optional(),
+  q: z.string().trim().min(1).optional(),
+});
+
+const AdminCreateBookingSchema = z.object({
+  slotId: z.string().min(1),
+  hostName: z.string().min(1),
+  hostPhoneNumber: z.string().min(1),
+  caddieArrangement: z.enum(['none', 'shared', 'per_player']),
+  playerDetails: z.array(PlayerDetailSchema).min(1),
+});
+
+const AdminUpdateBookingSchema = z.object({
+  hostName: z.string().min(1).optional(),
+  hostPhoneNumber: z.string().min(1).optional(),
+  caddieArrangement: z.enum(['none', 'shared', 'per_player']).optional(),
+  playerDetails: z.array(PlayerDetailSchema).min(1).optional(),
+});
+
+const AdminUpdateBookingStatusSchema = z.object({
+  status: z.enum(['confirmed', 'cancelled', 'completed', 'no_show']),
+  reason: z.string().min(1).optional(),
+});
+
+const AdminMoveBookingSlotSchema = z.object({
+  slotId: z.string().min(1),
+});
+
+const AdminMarkPaidSchema = z.object({
+  note: z.string().trim().min(1).optional(),
+});
+
+const AdminBookingDocumentSchema = z.object({
+  type: z.enum(['invoice', 'receipt']),
+});
+
+const AdminBlockSlotSchema = z.object({
+  reason: z.string().trim().min(1).optional(),
+});
+
+const AdminBulkBlockSlotsSchema = z
+  .object({
+    golfClubSlug: z.string().min(1),
+    slotIds: z.array(z.string().min(1)).min(1).optional(),
+    startAt: z.string().datetime().optional(),
+    endAt: z.string().datetime().optional(),
+    reason: z.string().trim().min(1).optional(),
+  })
+  .refine(
+    (value) => value.slotIds || (value.startAt && value.endAt),
+    'Provide slotIds or a startAt/endAt range',
+  );
+
+const AdminReportQuerySchema = z.object({
+  golfClubSlug: z.string().min(1).optional(),
+  dateFrom: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  dateTo: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+});
+
+const AdminMonthlyTrendQuerySchema = z.object({
+  golfClubSlug: z.string().min(1).optional(),
+  months: z.number().int().positive().max(24).optional(),
+});
+
+const AdminSlotUtilizationQuerySchema = z.object({
+  golfClubSlug: z.string().min(1),
+  bookingDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+});
+
+const AdminVoucherSchema = z.object({
+  code: z.string().trim().min(1).optional(),
+  name: z.string().trim().min(1).optional(),
+  description: z.string().trim().optional().nullable(),
+  discount_type: z.enum(['fixed_amount', 'percentage']).optional(),
+  discount_value: z.number().nonnegative().optional(),
+  max_discount_amount: z.number().nonnegative().nullable().optional(),
+  min_booking_amount: z.number().nonnegative().optional(),
+  currency: z.string().trim().min(1).optional(),
+  max_total_redemptions: z.number().int().positive().nullable().optional(),
+  max_redemptions_per_user: z.number().int().positive().optional(),
+  first_time_booking_only: z.boolean().optional(),
+  starts_at: z.string().datetime().nullable().optional(),
+  ends_at: z.string().datetime().nullable().optional(),
+  active: z.boolean().optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+});
+
+const AdminPublicHolidayQuerySchema = z.object({
+  golfClubSlug: z.string().trim().min(1),
+  year: z.number().int().min(2020).max(2100).optional(),
+});
+
+const AdminPublicHolidaySchema = z.object({
+  golfClubSlug: z.string().trim().min(1).optional(),
+  holidayDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  name: z.string().trim().min(1).optional(),
+  rateDayType: z.enum(['weekend']).optional(),
+  active: z.boolean().optional(),
+});
+
 const QuickBookSchema = z.object({
   golfClubSlug: z.string().min(1).optional(),
   latitude: z.number().finite().optional(),
@@ -165,11 +290,361 @@ export class BookingController {
     return this.bookingAdminService.fetchAdminSlotBoard(data);
   }
 
+  @Get('admin/dashboard')
+  @UseGuards(AppAuthGuard)
+  async fetchAdminDashboard(
+    @Req() req: { appUser?: { sub: string } },
+    @Query('golfClubSlug') golfClubSlug?: string,
+    @Query('bookingDate') bookingDate?: string,
+  ) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    const data = AdminDashboardSchema.parse({ golfClubSlug, bookingDate });
+    return this.bookingAdminService.fetchAdminDashboard(data);
+  }
+
   @Get('admin/bookings')
   @UseGuards(AppAuthGuard)
-  async fetchAdminBookedBookings(@Req() req: { appUser?: { sub: string } }) {
+  async fetchAdminBookedBookings(
+    @Req() req: { appUser?: { sub: string } },
+    @Query('golfClubSlug') golfClubSlug?: string,
+    @Query('bookingDate') bookingDate?: string,
+    @Query('status') status?: string,
+    @Query('q') q?: string,
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
+  ) {
     await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
-    return this.bookingAdminService.fetchAdminBookedBookings();
+    const data = AdminBookingListSchema.parse({
+      golfClubSlug,
+      bookingDate,
+      status,
+      q,
+    });
+    return this.bookingAdminService.fetchAdminBookings({
+      ...data,
+      page: parsePositiveInteger(page, 1, 'page'),
+      pageSize: parsePositiveInteger(pageSize, 50, 'pageSize'),
+    });
+  }
+
+  @Post('admin/bookings')
+  @UseGuards(AppAuthGuard)
+  async createAdminBooking(
+    @Req() req: { appUser?: { sub: string } },
+    @Body() body: unknown,
+  ) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    const data = AdminCreateBookingSchema.parse(body);
+    return this.bookingAdminService.createAdminBooking(data);
+  }
+
+  @Get('admin/bookings/:bookingRef')
+  @UseGuards(AppAuthGuard)
+  async fetchAdminBookingDetailsV2(
+    @Param('bookingRef') bookingRef: string,
+    @Req() req: { appUser?: { sub: string } },
+  ) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    return this.bookingAdminService.fetchAdminBookingDetails(bookingRef);
+  }
+
+  @Patch('admin/bookings/:bookingRef')
+  @UseGuards(AppAuthGuard)
+  async updateAdminBooking(
+    @Param('bookingRef') bookingRef: string,
+    @Req() req: { appUser?: { sub: string } },
+    @Body() body: unknown,
+  ) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    const data = AdminUpdateBookingSchema.parse(body);
+    return this.bookingAdminService.updateAdminBookingDetails(bookingRef, data);
+  }
+
+  @Patch('admin/bookings/:bookingRef/status')
+  @UseGuards(AppAuthGuard)
+  async updateAdminBookingStatus(
+    @Param('bookingRef') bookingRef: string,
+    @Req() req: { appUser?: { sub: string } },
+    @Body() body: unknown,
+  ) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    const data = AdminUpdateBookingStatusSchema.parse(body);
+    return this.bookingAdminService.updateAdminBookingStatus(bookingRef, data);
+  }
+
+  @Post('admin/bookings/:bookingRef/move-slot')
+  @UseGuards(AppAuthGuard)
+  async moveAdminBookingSlot(
+    @Param('bookingRef') bookingRef: string,
+    @Req() req: { appUser?: { sub: string } },
+    @Body() body: unknown,
+  ) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    const data = AdminMoveBookingSlotSchema.parse(body);
+    return this.bookingAdminService.moveAdminBookingSlot(bookingRef, data);
+  }
+
+  @Post('admin/bookings/:bookingRef/mark-paid')
+  @UseGuards(AppAuthGuard)
+  async markAdminBookingPaid(
+    @Param('bookingRef') bookingRef: string,
+    @Req() req: { appUser?: { sub: string } },
+    @Body() body: unknown,
+  ) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    const data = AdminMarkPaidSchema.parse(body);
+    return this.bookingAdminService.markAdminBookingPaid(bookingRef, data);
+  }
+
+  @Post('admin/bookings/:bookingRef/document')
+  @UseGuards(AppAuthGuard)
+  async createAdminBookingDocument(
+    @Param('bookingRef') bookingRef: string,
+    @Req() req: { appUser?: { sub: string } },
+    @Body() body: unknown,
+  ) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    const data = AdminBookingDocumentSchema.parse(body);
+    return this.bookingAdminService.createAdminBookingDocument(
+      bookingRef,
+      data,
+    );
+  }
+
+  @Post('admin/slots/:slotId/block')
+  @UseGuards(AppAuthGuard)
+  async blockAdminSlot(
+    @Param('slotId') slotId: string,
+    @Req() req: { appUser?: { sub: string } },
+    @Body() body: unknown,
+  ) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    const data = AdminBlockSlotSchema.parse(body);
+    return this.bookingAdminService.blockSlot(slotId, data);
+  }
+
+  @Post('admin/slots/:slotId/unblock')
+  @UseGuards(AppAuthGuard)
+  async unblockAdminSlot(
+    @Param('slotId') slotId: string,
+    @Req() req: { appUser?: { sub: string } },
+  ) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    return this.bookingAdminService.unblockSlot(slotId);
+  }
+
+  @Post('admin/slots/bulk-block')
+  @UseGuards(AppAuthGuard)
+  async bulkBlockAdminSlots(
+    @Req() req: { appUser?: { sub: string } },
+    @Body() body: unknown,
+  ) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    const data = AdminBulkBlockSlotsSchema.parse(body);
+    return this.bookingAdminService.bulkBlockSlots(data);
+  }
+
+  @Get('admin/public-holidays')
+  @UseGuards(AppAuthGuard)
+  async fetchAdminPublicHolidays(
+    @Req() req: { appUser?: { sub: string } },
+    @Query('golfClubSlug') golfClubSlug?: string,
+    @Query('year') year?: string,
+  ) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    const data = AdminPublicHolidayQuerySchema.parse({
+      golfClubSlug,
+      year: year ? Number(year) : undefined,
+    });
+    return this.bookingAdminService.fetchPublicHolidays(data);
+  }
+
+  @Post('admin/public-holidays')
+  @UseGuards(AppAuthGuard)
+  async createAdminPublicHoliday(
+    @Req() req: { appUser?: { sub: string } },
+    @Body() body: unknown,
+  ) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    const data = AdminPublicHolidaySchema.required({
+      golfClubSlug: true,
+      holidayDate: true,
+      name: true,
+    }).parse(body);
+    return this.bookingAdminService.createPublicHoliday(
+      {
+        golfClubSlug: data.golfClubSlug,
+        holidayDate: data.holidayDate,
+        name: data.name,
+        rateDayType: data.rateDayType,
+        active: data.active,
+      },
+      req.appUser?.sub ?? '',
+    );
+  }
+
+  @Patch('admin/public-holidays/:holidayId')
+  @UseGuards(AppAuthGuard)
+  async updateAdminPublicHoliday(
+    @Param('holidayId') holidayId: string,
+    @Req() req: { appUser?: { sub: string } },
+    @Body() body: unknown,
+  ) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    const data = AdminPublicHolidaySchema.omit({ golfClubSlug: true }).parse(
+      body,
+    );
+    return this.bookingAdminService.updatePublicHoliday(holidayId, {
+      holidayDate: data.holidayDate,
+      name: data.name,
+      rateDayType: data.rateDayType,
+      active: data.active,
+    });
+  }
+
+  @Delete('admin/public-holidays/:holidayId')
+  @UseGuards(AppAuthGuard)
+  async deleteAdminPublicHoliday(
+    @Param('holidayId') holidayId: string,
+    @Req() req: { appUser?: { sub: string } },
+  ) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    return this.bookingAdminService.deletePublicHoliday(holidayId);
+  }
+
+  @Get('admin/customers')
+  @UseGuards(AppAuthGuard)
+  async fetchAdminCustomers(
+    @Req() req: { appUser?: { sub: string } },
+    @Query('q') q?: string,
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
+  ) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    return this.bookingAdminService.fetchAdminCustomers({
+      q,
+      page: parsePositiveInteger(page, 1, 'page'),
+      pageSize: parsePositiveInteger(pageSize, 50, 'pageSize'),
+    });
+  }
+
+  @Get('admin/customers/:userId/bookings')
+  @UseGuards(AppAuthGuard)
+  async fetchAdminCustomerBookings(
+    @Req() req: { appUser?: { sub: string } },
+    @Param('userId') userId: string,
+  ) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    return this.bookingAdminService.fetchAdminCustomerBookings(userId);
+  }
+
+  @Get('admin/reports/bookings')
+  @UseGuards(AppAuthGuard)
+  async fetchAdminBookingReport(
+    @Req() req: { appUser?: { sub: string } },
+    @Query('golfClubSlug') golfClubSlug?: string,
+    @Query('dateFrom') dateFrom?: string,
+    @Query('dateTo') dateTo?: string,
+  ) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    const data = AdminReportQuerySchema.parse({
+      golfClubSlug,
+      dateFrom,
+      dateTo,
+    });
+    return this.bookingAdminService.fetchBookingReport(data);
+  }
+
+  @Get('admin/reports/revenue')
+  @UseGuards(AppAuthGuard)
+  async fetchAdminRevenueReport(
+    @Req() req: { appUser?: { sub: string } },
+    @Query('golfClubSlug') golfClubSlug?: string,
+    @Query('dateFrom') dateFrom?: string,
+    @Query('dateTo') dateTo?: string,
+  ) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    const data = AdminReportQuerySchema.parse({
+      golfClubSlug,
+      dateFrom,
+      dateTo,
+    });
+    return this.bookingAdminService.fetchRevenueReport(data);
+  }
+
+  @Get('admin/reports/slot-utilization')
+  @UseGuards(AppAuthGuard)
+  async fetchAdminSlotUtilizationReport(
+    @Req() req: { appUser?: { sub: string } },
+    @Query('golfClubSlug') golfClubSlug?: string,
+    @Query('bookingDate') bookingDate?: string,
+  ) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    const data = AdminSlotUtilizationQuerySchema.parse({
+      golfClubSlug,
+      bookingDate,
+    });
+    return this.bookingAdminService.fetchSlotUtilizationReport(data);
+  }
+
+  @Get('admin/reports/monthly-trend')
+  @UseGuards(AppAuthGuard)
+  async fetchAdminMonthlyTrendReport(
+    @Req() req: { appUser?: { sub: string } },
+    @Query('golfClubSlug') golfClubSlug?: string,
+    @Query('months') months?: string,
+  ) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    const data = AdminMonthlyTrendQuerySchema.parse({
+      golfClubSlug,
+      months: months ? Number(months) : undefined,
+    });
+    return this.bookingAdminService.fetchMonthlyTrendReport(data);
+  }
+
+  @Get('admin/vouchers')
+  @UseGuards(AppAuthGuard)
+  async fetchAdminVouchers(@Req() req: { appUser?: { sub: string } }) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    return this.bookingAdminService.fetchAdminVouchers();
+  }
+
+  @Post('admin/vouchers')
+  @UseGuards(AppAuthGuard)
+  async createAdminVoucher(
+    @Req() req: { appUser?: { sub: string } },
+    @Body() body: unknown,
+  ) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    const data = AdminVoucherSchema.required({
+      code: true,
+      name: true,
+      discount_type: true,
+      discount_value: true,
+    }).parse(body);
+    return this.bookingAdminService.createAdminVoucher(data);
+  }
+
+  @Patch('admin/vouchers/:voucherId')
+  @UseGuards(AppAuthGuard)
+  async updateAdminVoucher(
+    @Req() req: { appUser?: { sub: string } },
+    @Param('voucherId') voucherId: string,
+    @Body() body: unknown,
+  ) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    const data = AdminVoucherSchema.parse(body);
+    return this.bookingAdminService.updateAdminVoucher(voucherId, data);
+  }
+
+  @Get('admin/vouchers/:voucherId/redemptions')
+  @UseGuards(AppAuthGuard)
+  async fetchAdminVoucherRedemptions(
+    @Req() req: { appUser?: { sub: string } },
+    @Param('voucherId') voucherId: string,
+  ) {
+    await this.authService.ensureAdminAccess(req.appUser?.sub ?? '');
+    return this.bookingAdminService.fetchAdminVoucherRedemptions(voucherId);
   }
 
   @Get('admin/:bookingRef')

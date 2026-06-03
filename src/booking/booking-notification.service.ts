@@ -19,6 +19,11 @@ type BookingNotificationPayload = {
   players: BookingNotificationPlayer[];
 };
 
+type NotificationChannelResult = {
+  status: 'sent' | 'skipped' | 'failed';
+  detail?: string;
+};
+
 @Injectable()
 export class BookingNotificationService {
   private readonly logger = new Logger(BookingNotificationService.name);
@@ -26,23 +31,36 @@ export class BookingNotificationService {
   constructor(private readonly config: ConfigService) {}
 
   async sendBookingConfirmed(payload: BookingNotificationPayload) {
-    await Promise.allSettled([
+    const [whatsappResult, clubEmailResult] = await Promise.allSettled([
       this.sendWhatsappConfirmations(payload),
       this.sendClubEmail(payload),
-    ]).then((results) => {
-      results.forEach((result) => {
-        if (result.status === 'rejected') {
-          this.logger.warn(
-            result.reason instanceof Error
-              ? result.reason.message
-              : String(result.reason),
-          );
-        }
-      });
-    });
+    ]);
+
+    const result = {
+      whatsapp:
+        whatsappResult.status === 'fulfilled'
+          ? whatsappResult.value
+          : this.toFailedResult(whatsappResult.reason),
+      clubEmail:
+        clubEmailResult.status === 'fulfilled'
+          ? clubEmailResult.value
+          : this.toFailedResult(clubEmailResult.reason),
+    };
+
+    this.logger.log(
+      `Booking notification result for ${payload.bookingRef}: WhatsApp=${result.whatsapp.status}${
+        result.whatsapp.detail ? ` (${result.whatsapp.detail})` : ''
+      }, ClubEmail=${result.clubEmail.status}${
+        result.clubEmail.detail ? ` (${result.clubEmail.detail})` : ''
+      }`,
+    );
+
+    return result;
   }
 
-  private async sendWhatsappConfirmations(payload: BookingNotificationPayload) {
+  private async sendWhatsappConfirmations(
+    payload: BookingNotificationPayload,
+  ): Promise<NotificationChannelResult> {
     const accountSid = this.config.get<string>('TWILIO_ACCOUNT_SID');
     const authToken = this.config.get<string>('TWILIO_AUTH_TOKEN');
     const from =
@@ -51,7 +69,7 @@ export class BookingNotificationService {
 
     if (!accountSid || !authToken) {
       this.logger.warn('Twilio credentials are not configured');
-      return;
+      return { status: 'skipped', detail: 'Twilio credentials missing' };
     }
 
     const uniquePhones = [
@@ -60,7 +78,11 @@ export class BookingNotificationService {
       ),
     ];
 
-    await Promise.all(
+    if (uniquePhones.length === 0) {
+      return { status: 'skipped', detail: 'No player phone numbers' };
+    }
+
+    const results = await Promise.allSettled(
       uniquePhones.map((phoneNumber) =>
         this.sendTwilioWhatsappMessage(
           accountSid,
@@ -71,6 +93,25 @@ export class BookingNotificationService {
         ),
       ),
     );
+
+    const failed = results.filter((result) => result.status === 'rejected');
+    if (failed.length > 0) {
+      const details = failed
+        .map((result) =>
+          result.status === 'rejected' ? this.errorMessage(result.reason) : '',
+        )
+        .filter(Boolean)
+        .join(' | ');
+      return {
+        status: 'failed',
+        detail: details || `${failed.length} WhatsApp message(s) failed`,
+      };
+    }
+
+    return {
+      status: 'sent',
+      detail: `${uniquePhones.length} recipient(s)`,
+    };
   }
 
   private async sendTwilioWhatsappMessage(
@@ -110,10 +151,12 @@ export class BookingNotificationService {
     }
   }
 
-  private async sendClubEmail(payload: BookingNotificationPayload) {
+  private async sendClubEmail(
+    payload: BookingNotificationPayload,
+  ): Promise<NotificationChannelResult> {
     if (!payload.clubEmail) {
       this.logger.warn(`Club email is missing for ${payload.clubName}`);
-      return;
+      return { status: 'skipped', detail: 'Club email missing' };
     }
 
     const host = this.config.get<string>('SMTP_HOST');
@@ -126,7 +169,7 @@ export class BookingNotificationService {
 
     if (!host || !from) {
       this.logger.warn('SMTP settings are not configured');
-      return;
+      return { status: 'skipped', detail: 'SMTP settings missing' };
     }
 
     const transporter = nodemailer.createTransport({
@@ -136,12 +179,28 @@ export class BookingNotificationService {
       auth: user && pass ? { user, pass } : undefined,
     });
 
-    await transporter.sendMail({
+    const sent = await transporter.sendMail({
       from,
       to: payload.clubEmail,
       subject: `New GolfKakis booking ${payload.bookingRef}`,
       text: this.buildClubEmail(payload),
     });
+
+    return {
+      status: 'sent',
+      detail: `to=${payload.clubEmail}, messageId=${sent.messageId ?? 'n/a'}`,
+    };
+  }
+
+  private toFailedResult(error: unknown): NotificationChannelResult {
+    return {
+      status: 'failed',
+      detail: this.errorMessage(error),
+    };
+  }
+
+  private errorMessage(error: unknown) {
+    return error instanceof Error ? error.message : String(error);
   }
 
   private buildPlayerMessage(payload: BookingNotificationPayload) {

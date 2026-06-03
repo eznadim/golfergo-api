@@ -298,21 +298,22 @@ export class BookingSubmitService {
     const refreshed = await this.bookingService.getBookingAggregateById(
       aggregate.booking.booking_id,
     );
-    await this.bookingNotificationService.sendBookingConfirmed({
-      bookingRef: refreshed.booking.booking_ref,
-      clubName:
-        refreshed.facility?.facility_name ?? refreshed.organization.name,
-      clubEmail: refreshed.organization.email,
-      bookingDate: this.bookingService.extractDate(refreshed.slot.start_at),
-      teeTime: this.bookingService.formatTeeTime(refreshed.slot.start_at),
-      playerCount: bookingConfig.playerCount,
-      grandTotal: pricingSummary.finalAmount,
-      currency: 'MYR',
-      players: refreshed.players.map((player) => ({
-        name: player.name,
-        phoneNumber: player.phone_number,
-      })),
-    });
+    const notificationStatus =
+      await this.bookingNotificationService.sendBookingConfirmed({
+        bookingRef: refreshed.booking.booking_ref,
+        clubName:
+          refreshed.facility?.facility_name ?? refreshed.organization.name,
+        clubEmail: refreshed.organization.email,
+        bookingDate: this.bookingService.extractDate(refreshed.slot.start_at),
+        teeTime: this.bookingService.formatTeeTime(refreshed.slot.start_at),
+        playerCount: bookingConfig.playerCount,
+        grandTotal: pricingSummary.finalAmount,
+        currency: 'MYR',
+        players: refreshed.players.map((player) => ({
+          name: player.name,
+          phoneNumber: player.phone_number,
+        })),
+      });
 
     return {
       bookingId: refreshed.booking.booking_id,
@@ -341,6 +342,7 @@ export class BookingSubmitService {
         currency: 'MYR',
         paymentMethod: bookingConfig.paymentMethod,
       },
+      notificationStatus,
     };
   }
 

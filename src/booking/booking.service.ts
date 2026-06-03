@@ -15,6 +15,7 @@ type BookingStatus =
   | 'pending_payment'
   | 'confirmed'
   | 'completed'
+  | 'no_show'
   | 'cancelled'
   | 'expired';
 type ResourceType = 'tee_time' | 'caddie' | 'golf_cart' | 'buggy';
@@ -188,6 +189,20 @@ type AvailabilityOverrideRow = {
   resource_instance_id: string | null;
   start_at: string;
   end_at: string;
+};
+
+type PublicHolidayRow = {
+  holiday_id: string;
+  organization_id: string;
+  facility_id: string | null;
+  holiday_date: string;
+  name: string;
+  rate_day_type: 'weekend';
+  active: boolean | null;
+  metadata: Record<string, unknown> | null;
+  created_by: string | null;
+  created_at: string | null;
+  updated_at: string | null;
 };
 
 type AppUserRow = {
@@ -580,13 +595,21 @@ export class BookingService {
           return null;
         }
 
+        const effectiveTeeInstance = await this.resolveEffectiveTeeInstance({
+          organization: clubContext.organization,
+          facility: clubContext.facility,
+          slot,
+          teeInstance,
+          teeInstances: [...clubContext.teeInstancesById.values()],
+        });
+
         const availability = await this.getSlotAvailability({
           organization: clubContext.organization,
           organizationSport: clubContext.organizationSport,
           facility: clubContext.facility,
           slot,
           teeResource,
-          teeInstance,
+          teeInstance: effectiveTeeInstance,
           resourceCatalog: clubContext.resourceCatalog,
         });
 
@@ -600,10 +623,10 @@ export class BookingService {
           localTime: this.formatLocalTime(slot.start_at),
           startAt: slot.start_at,
           endAt: slot.end_at,
-          playType: this.getSlotPlayType(teeInstance, slot),
-          pricingCategory: teeInstance.pricing_category,
-          minPlayers: this.getMinPlayers(teeInstance),
-          maxPlayers: this.getMaxPlayers(teeInstance),
+          playType: this.getSlotPlayType(effectiveTeeInstance, slot),
+          pricingCategory: effectiveTeeInstance.pricing_category,
+          minPlayers: this.getMinPlayers(effectiveTeeInstance),
+          maxPlayers: this.getMaxPlayers(effectiveTeeInstance),
           price: {
             adult: availability.teeTimeUnitPrice,
             seniorJunior: availability.seniorJuniorUnitPrice,
@@ -1231,6 +1254,119 @@ export class BookingService {
     );
   }
 
+  async fetchAdminTeeSlots(input: {
+    golfClubSlug: string;
+    bookingDate: string;
+    playType: PlayType;
+  }) {
+    const clubContext = await this.getClubContextBySlug(input.golfClubSlug);
+    const teeInstanceIds = [...clubContext.teeInstancesById.values()]
+      .filter((instance) => {
+        const instancePlayType = this.getInstancePlayType(instance);
+        return !instancePlayType || instancePlayType === input.playType;
+      })
+      .map((instance) => instance.resource_instance_id);
+
+    if (teeInstanceIds.length === 0) {
+      return {
+        club: {
+          slug: clubContext.organization.slug,
+          name:
+            clubContext.facility.facility_name ||
+            clubContext.organization.name,
+        },
+        bookingDate: input.bookingDate,
+        playType: input.playType,
+        slots: [],
+      };
+    }
+
+    const { dayStartIso, dayEndIso } = this.getDayRange(input.bookingDate);
+    const result = await this.supabase.client
+      .from('resource_slot')
+      .select('slot_id, resource_instance_id, start_at, end_at, base_price')
+      .in('resource_instance_id', teeInstanceIds)
+      .gte('start_at', dayStartIso)
+      .lt('start_at', dayEndIso)
+      .order('start_at', { ascending: true });
+
+    if (result.error) {
+      this.throwSupabaseError(result.error.message);
+    }
+
+    const overrides = await this.getAvailabilityOverrides(
+      clubContext.facility.facility_id,
+      dayStartIso,
+      dayEndIso,
+    );
+
+    const slots = await Promise.all(
+      ((result.data ?? []) as ResourceSlotRow[]).map(async (slot) => {
+        const teeInstance = clubContext.teeInstancesById.get(
+          slot.resource_instance_id,
+        );
+        if (!teeInstance) {
+          return null;
+        }
+
+        const teeResource = clubContext.resourceCatalog.byId.get(
+          teeInstance.resource_id,
+        );
+        if (!teeResource) {
+          return null;
+        }
+
+        const effectiveTeeInstance = await this.resolveEffectiveTeeInstance({
+          organization: clubContext.organization,
+          facility: clubContext.facility,
+          slot,
+          teeInstance,
+          teeInstances: [...clubContext.teeInstancesById.values()],
+        });
+        const isBlocked = this.isOverridden(slot, overrides);
+        const availability = isBlocked
+          ? null
+          : await this.getSlotAvailability({
+              organization: clubContext.organization,
+              organizationSport: clubContext.organizationSport,
+              facility: clubContext.facility,
+              slot,
+              teeResource,
+              teeInstance: effectiveTeeInstance,
+              resourceCatalog: clubContext.resourceCatalog,
+            });
+        const fromPrice = availability?.publishedRateUnitPrice
+          ?? this.getBasePrice(effectiveTeeInstance);
+
+        return {
+          slotId: slot.slot_id,
+          teeTimeSlot: this.formatTeeTime(slot.start_at),
+          startAt: slot.start_at,
+          endAt: slot.end_at,
+          playType: this.getSlotPlayType(effectiveTeeInstance, slot),
+          selectedNine: null,
+          remainingPlayerCapacity: availability?.playerCapacity ?? 0,
+          currency: CURRENCY,
+          fromPrice,
+          isBlocked,
+        };
+      }),
+    );
+
+    return {
+      club: {
+        slug: clubContext.organization.slug,
+        name:
+          clubContext.facility.facility_name || clubContext.organization.name,
+      },
+      bookingDate: input.bookingDate,
+      playType: input.playType,
+      slots: slots.filter(
+        (slot): slot is NonNullable<typeof slot> => slot !== null,
+      ),
+    };
+  }
+
   private async getAvailabilityOverrides(
     facilityId: string,
     rangeStartIso: string,
@@ -1358,13 +1494,20 @@ export class BookingService {
       throw new NotFoundException(`Facility not found for slot: ${slotId}`);
     }
 
+    const effectiveTeeInstance = await this.resolveEffectiveTeeInstance({
+      organization,
+      facility,
+      slot,
+      teeInstance,
+    });
+
     return {
       organization,
       organizationSport,
       facility,
       slot,
       teeResource,
-      teeInstance,
+      teeInstance: effectiveTeeInstance,
       resourceCatalog,
     };
   }
@@ -1449,6 +1592,108 @@ export class BookingService {
       golfCartUnitPrice: BUGGY_FEE_PER_PLAYER,
       activeBookingCount: activeBookings.length,
     };
+  }
+
+  private async resolveEffectiveTeeInstance(input: {
+    organization: OrganizationRow;
+    facility: FacilityRow;
+    slot: ResourceSlotRow;
+    teeInstance: ResourceInstanceRow;
+    teeInstances?: ResourceInstanceRow[];
+  }) {
+    const bookingDate = this.extractDate(input.slot.start_at);
+    const holiday = await this.getActivePublicHoliday(
+      input.organization.organization_id,
+      input.facility.facility_id,
+      bookingDate,
+    );
+
+    if (!holiday || holiday.rate_day_type !== 'weekend') {
+      return input.teeInstance;
+    }
+
+    if (this.isWeekendRateInstance(input.teeInstance)) {
+      return input.teeInstance;
+    }
+
+    const period = this.getMalaysiaHour(input.slot.start_at) < 12 ? 'AM' : 'PM';
+    const playType = this.getSlotPlayType(input.teeInstance, input.slot);
+    const candidateInstances =
+      input.teeInstances ??
+      (await this.getResourceInstancesByResourceIds(
+        input.organization.organization_id,
+        [input.teeInstance.resource_id],
+      ));
+
+    return (
+      candidateInstances.find(
+        (instance) =>
+          instance.resource_id === input.teeInstance.resource_id &&
+          this.getInstancePlayType(instance) === playType &&
+          this.isWeekendRateInstance(instance) &&
+          this.getRatePeriod(instance) === period,
+      ) ?? input.teeInstance
+    );
+  }
+
+  private async getActivePublicHoliday(
+    organizationId: string,
+    facilityId: string,
+    holidayDate: string,
+  ) {
+    const result = await this.supabase.client
+      .from('public_holiday_calendar')
+      .select(
+        'holiday_id, organization_id, facility_id, holiday_date, name, rate_day_type, active, metadata, created_by, created_at, updated_at',
+      )
+      .eq('organization_id', organizationId)
+      .eq('holiday_date', holidayDate)
+      .eq('active', true);
+
+    if (result.error) {
+      this.throwSupabaseError(result.error.message);
+    }
+
+    const rows = ((result.data ?? []) as PublicHolidayRow[]).filter(
+      (row) => row.facility_id === null || row.facility_id === facilityId,
+    );
+
+    return (
+      rows.find((row) => row.facility_id === facilityId) ?? rows[0] ?? null
+    );
+  }
+
+  private isWeekendRateInstance(instance: ResourceInstanceRow) {
+    const value = `${instance.identifier ?? ''} ${instance.pricing_category ?? ''}`
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_');
+    return value.includes('weekend');
+  }
+
+  private getRatePeriod(instance: ResourceInstanceRow) {
+    const value = `${instance.identifier ?? ''} ${instance.pricing_category ?? ''}`
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_');
+
+    if (value.includes('_am') || value.endsWith('am')) {
+      return 'AM';
+    }
+
+    if (value.includes('_pm') || value.endsWith('pm')) {
+      return 'PM';
+    }
+
+    return null;
+  }
+
+  private getMalaysiaHour(isoDateTime: string) {
+    const hour = new Intl.DateTimeFormat('en-GB', {
+      hour: '2-digit',
+      hour12: false,
+      timeZone: 'Asia/Kuala_Lumpur',
+    }).format(new Date(isoDateTime));
+
+    return Number(hour);
   }
 
   private async getSupportResourceSlots(
@@ -1553,13 +1798,21 @@ export class BookingService {
           continue;
         }
 
+        const effectiveTeeInstance = await this.resolveEffectiveTeeInstance({
+          organization: clubContext.organization,
+          facility: clubContext.facility,
+          slot,
+          teeInstance,
+          teeInstances: [...clubContext.teeInstancesById.values()],
+        });
+
         const availability = await this.getSlotAvailability({
           organization: clubContext.organization,
           organizationSport: clubContext.organizationSport,
           facility: clubContext.facility,
           slot,
           teeResource,
-          teeInstance,
+          teeInstance: effectiveTeeInstance,
           resourceCatalog: clubContext.resourceCatalog,
         });
 
@@ -1576,7 +1829,7 @@ export class BookingService {
           teeTimeSlot: this.formatTeeTime(slot.start_at),
           startAt: slot.start_at,
           endAt: slot.end_at,
-          playType: this.getSlotPlayType(teeInstance, slot),
+          playType: this.getSlotPlayType(effectiveTeeInstance, slot),
           remainingPlayerCapacity: availability.playerCapacity,
           fromPrice: availability.publishedRateUnitPrice,
           price: {
@@ -1644,6 +1897,7 @@ export class BookingService {
         'pending_payment',
         'confirmed',
         'completed',
+        'no_show',
       ]);
 
     if (result.error) {
@@ -1656,6 +1910,7 @@ export class BookingService {
         (booking) =>
           booking.status === 'confirmed' ||
           booking.status === 'completed' ||
+          booking.status === 'no_show' ||
           booking.status === 'pending_payment' ||
           ((booking.status === 'held' || booking.status === 'hold') &&
             !this.isHoldExpired(booking)),

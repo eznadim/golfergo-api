@@ -8,11 +8,14 @@ export class VisitorsService {
   async heartbeat(visitorId: string, platform: string) {
     const { data, error } = await this.supabase.client
       .from('visitors')
-      .upsert({
-        id: visitorId,
-        platform,
-        last_seen_at: new Date().toISOString(),
-      }, { onConflict: 'id' })
+      .upsert(
+        {
+          id: visitorId,
+          platform,
+          last_seen_at: new Date().toISOString(),
+        },
+        { onConflict: 'id' },
+      )
       .select()
       .single();
 

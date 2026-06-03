@@ -17,7 +17,9 @@ export class IdempotencyService {
   async getExistingBookingHold(idempotencyKey: string) {
     const result = await this.supabase.client
       .from('booking_idempotency')
-      .select('idempotency_key, visitor_id, user_id, booking_id, request_type, created_at')
+      .select(
+        'idempotency_key, visitor_id, user_id, booking_id, request_type, created_at',
+      )
       .eq('idempotency_key', idempotencyKey)
       .maybeSingle<IdempotencyRow>();
 
@@ -34,14 +36,16 @@ export class IdempotencyService {
     userId: string,
     bookingId: string,
   ) {
-    const result = await this.supabase.client.from('booking_idempotency').insert({
-      idempotency_key: idempotencyKey,
-      visitor_id: visitorId,
-      user_id: userId,
-      booking_id: bookingId,
-      request_type: 'booking_hold',
-      created_at: new Date().toISOString(),
-    });
+    const result = await this.supabase.client
+      .from('booking_idempotency')
+      .insert({
+        idempotency_key: idempotencyKey,
+        visitor_id: visitorId,
+        user_id: userId,
+        booking_id: bookingId,
+        request_type: 'booking_hold',
+        created_at: new Date().toISOString(),
+      });
 
     if (result.error) {
       throw new InternalServerErrorException(result.error.message);

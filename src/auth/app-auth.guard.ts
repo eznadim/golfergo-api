@@ -32,7 +32,8 @@ export class AppAuthGuard implements CanActivate {
 
     const token = auth.slice(7);
     const secret = new TextEncoder().encode(
-      this.config.get<string>('APP_AUTH_JWT_SECRET') ?? 'dev-mock-app-auth-secret',
+      this.config.get<string>('APP_AUTH_JWT_SECRET') ??
+        'dev-mock-app-auth-secret',
     );
 
     try {
